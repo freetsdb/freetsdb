@@ -1,3 +1,5 @@
+*[English](README.md) ∙ [简体中文](README-zh-Hans.md)*
+
 # FreeTSDB 
 
 ## An Open-Source Time Series Database, and the BEST Open-Source replacement for InfluxDB Enterprise.
@@ -60,4 +62,3 @@ curl -G "http://localhost:8086/query?pretty=true" --data-urlencode "db=mydb" \
 ## Contact US
 
 * Email: [freetsdb@gmail.com](mailto:freetsdb@gmail.com).
-* QQ Group: 663274123
