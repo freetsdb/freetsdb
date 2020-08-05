@@ -13,4 +13,4 @@ FreeTSDB是InfluxDB企业版的开源替代，增强了代码健壮性、补齐�
 
 ## 联系我们
 * Email: [freetsdb@gmail.com](mailto:freetsdb@gmail.com)
-* FreeTSDB技术交流QQ群：663274123
+* 微信公众号：freetsdb
