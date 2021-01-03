@@ -1,9 +1,9 @@
-package cluster_test
+package coordinator_test
 
 import (
 	"time"
 
-	"github.com/freetsdb/freetsdb/influxql"
+	"github.com/freetsdb/freetsdb/services/influxql"
 	"github.com/freetsdb/freetsdb/services/meta"
 )
 
@@ -154,7 +154,7 @@ func (c *MetaClient) Users() []meta.UserInfo {
 // DefaultMetaClientDatabaseFn returns a single database (db0) with a retention policy.
 func DefaultMetaClientDatabaseFn(name string) (*meta.DatabaseInfo, error) {
 	return &meta.DatabaseInfo{
-		Name: DefaultDatabase,
+		Name:                   DefaultDatabase,
 		DefaultRetentionPolicy: DefaultRetentionPolicy,
 	}, nil
 }

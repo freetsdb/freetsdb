@@ -7,26 +7,25 @@ import (
 	"fmt"
 	"io"
 	"io/ioutil"
-	"log"
 	"net/http"
-	"os"
 	"runtime"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
-	"github.com/gogo/protobuf/proto"
-	"github.com/hashicorp/raft"
 	"github.com/freetsdb/freetsdb/services/meta/internal"
 	"github.com/freetsdb/freetsdb/uuid"
+	"github.com/gogo/protobuf/proto"
+	"github.com/hashicorp/raft"
+	"go.uber.org/zap"
 )
 
 // handler represents an HTTP handler for the meta service.
 type handler struct {
 	config *Config
 
-	logger         *log.Logger
+	logger         *zap.Logger
 	loggingEnabled bool // Log every HTTP access.
 	pprofEnabled   bool
 	store          interface {
@@ -36,9 +35,13 @@ type handler struct {
 		leaderHTTP() string
 		snapshot() (*Data, error)
 		apply(b []byte) error
-		join(n *NodeInfo) (*NodeInfo, error)
+		joinMeta(n *NodeInfo) (*NodeInfo, error)
+		joinData(n *NodeInfo) (*NodeInfo, error)
+		joinCluster(peers []string) (*NodeInfo, error)
 		otherMetaServersHTTP() []string
 		peers() []string
+		metaServersHTTP() []string
+		dataServers() []string
 	}
 	s *Service
 
@@ -52,7 +55,7 @@ func newHandler(c *Config, s *Service) *handler {
 	h := &handler{
 		s:              s,
 		config:         c,
-		logger:         log.New(os.Stderr, "[meta-http] ", log.LstdFlags),
+		logger:         zap.NewNop(),
 		loggingEnabled: c.ClusterTracing,
 		closing:        make(chan struct{}),
 		leases:         NewLeases(time.Duration(c.LeaseDuration)),
@@ -76,6 +79,13 @@ func (h *handler) WrapHandler(name string, hf http.HandlerFunc) http.Handler {
 	return handler
 }
 
+// WithLogger sets the logger for the client.
+func (h *handler) WithLogger(log *zap.Logger) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.logger = log.With(zap.String("service", "meta-http"))
+}
+
 // ServeHTTP responds to HTTP request to the handler.
 func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
@@ -87,11 +97,24 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			h.WrapHandler("lease", h.serveLease).ServeHTTP(w, r)
 		case "/peers":
 			h.WrapHandler("peers", h.servePeers).ServeHTTP(w, r)
+		case "/meta-servers":
+			h.WrapHandler("meta-servers", h.serveMetaServers).ServeHTTP(w, r)
+		case "/data-servers":
+			h.WrapHandler("data-servers", h.serveDataServers).ServeHTTP(w, r)
 		default:
 			h.WrapHandler("snapshot", h.serveSnapshot).ServeHTTP(w, r)
 		}
 	case "POST":
-		h.WrapHandler("execute", h.serveExec).ServeHTTP(w, r)
+		switch r.URL.Path {
+		case "/execute":
+			h.WrapHandler("execute", h.serveExec).ServeHTTP(w, r)
+		case "/add-meta":
+			h.WrapHandler("add-meta", h.serveAddMeta).ServeHTTP(w, r)
+		case "/add-data":
+			h.WrapHandler("add-data", h.serveAddData).ServeHTTP(w, r)
+		case "/join-cluster":
+			h.WrapHandler("join-cluster", h.serveJoinCluster).ServeHTTP(w, r)
+		}
 	default:
 		http.Error(w, "", http.StatusBadRequest)
 	}
@@ -131,45 +154,6 @@ func (h *handler) serveExec(w http.ResponseWriter, r *http.Request) {
 	body, err := ioutil.ReadAll(r.Body)
 	if err != nil {
 		h.httpError(err, w, http.StatusInternalServerError)
-		return
-	}
-
-	if r.URL.Path == "/join" {
-		n := &NodeInfo{}
-		if err := json.Unmarshal(body, n); err != nil {
-			h.httpError(err, w, http.StatusInternalServerError)
-			return
-		}
-
-		node, err := h.store.join(n)
-		if err == raft.ErrNotLeader {
-			l := h.store.leaderHTTP()
-			if l == "" {
-				// No cluster leader. Client will have to try again later.
-				h.httpError(errors.New("no leader"), w, http.StatusServiceUnavailable)
-				return
-			}
-			scheme := "http://"
-			if h.config.HTTPSEnabled {
-				scheme = "https://"
-			}
-
-			l = scheme + l + "/join"
-			http.Redirect(w, r, l, http.StatusTemporaryRedirect)
-			return
-		}
-
-		if err != nil {
-			h.httpError(err, w, http.StatusInternalServerError)
-			return
-		}
-
-		// Return the node with newly assigned ID as json
-		w.Header().Add("Content-Type", "application/json")
-		if err := json.NewEncoder(w).Encode(node); err != nil {
-			h.httpError(err, w, http.StatusInternalServerError)
-		}
-
 		return
 	}
 
@@ -223,6 +207,133 @@ func (h *handler) serveExec(w http.ResponseWriter, r *http.Request) {
 	// Send response to client.
 	w.Header().Add("Content-Type", "application/octet-stream")
 	w.Write(b)
+}
+
+func (h *handler) serveAddMeta(w http.ResponseWriter, r *http.Request) {
+	if h.isClosed() {
+		h.httpError(fmt.Errorf("server closed"), w, http.StatusServiceUnavailable)
+		return
+	}
+
+	// Read the command from the request body.
+	body, err := ioutil.ReadAll(r.Body)
+	if err != nil {
+		h.httpError(err, w, http.StatusInternalServerError)
+		return
+	}
+
+	n := &NodeInfo{}
+	if err := json.Unmarshal(body, n); err != nil {
+		h.httpError(err, w, http.StatusInternalServerError)
+		return
+	}
+
+	node, err := h.store.joinMeta(n)
+	if err == raft.ErrNotLeader {
+		l := h.store.leaderHTTP()
+		if l == "" {
+			// No cluster leader. Client will have to try again later.
+			h.httpError(errors.New("no leader"), w, http.StatusServiceUnavailable)
+			return
+		}
+		scheme := "http://"
+		if h.config.HTTPSEnabled {
+			scheme = "https://"
+		}
+
+		l = scheme + l + "/add-meta"
+		http.Redirect(w, r, l, http.StatusTemporaryRedirect)
+		return
+	}
+
+	if err != nil {
+		h.httpError(err, w, http.StatusInternalServerError)
+		return
+	}
+
+	// Return the node with newly assigned ID as json
+	w.Header().Add("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(node); err != nil {
+		h.httpError(err, w, http.StatusInternalServerError)
+	}
+
+}
+
+func (h *handler) serveAddData(w http.ResponseWriter, r *http.Request) {
+	if h.isClosed() {
+		h.httpError(fmt.Errorf("server closed"), w, http.StatusServiceUnavailable)
+		return
+	}
+
+	// Read the command from the request body.
+	body, err := ioutil.ReadAll(r.Body)
+	if err != nil {
+		h.httpError(err, w, http.StatusInternalServerError)
+		return
+	}
+
+	n := &NodeInfo{}
+	if err := json.Unmarshal(body, n); err != nil {
+		h.httpError(err, w, http.StatusInternalServerError)
+		return
+	}
+
+	node, err := h.store.joinData(n)
+	if err == raft.ErrNotLeader {
+		l := h.store.leaderHTTP()
+		if l == "" {
+			// No cluster leader. Client will have to try again later.
+			h.httpError(errors.New("no leader"), w, http.StatusServiceUnavailable)
+			return
+		}
+		scheme := "http://"
+		if h.config.HTTPSEnabled {
+			scheme = "https://"
+		}
+
+		l = scheme + l + "/add-data"
+		http.Redirect(w, r, l, http.StatusTemporaryRedirect)
+		return
+	}
+
+	if err != nil {
+		h.httpError(err, w, http.StatusInternalServerError)
+		return
+	}
+
+	// Return the node with newly assigned ID as json
+	w.Header().Add("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(node); err != nil {
+		h.httpError(err, w, http.StatusInternalServerError)
+	}
+
+}
+
+func (h *handler) serveJoinCluster(w http.ResponseWriter, r *http.Request) {
+	if h.isClosed() {
+		h.httpError(fmt.Errorf("server closed"), w, http.StatusServiceUnavailable)
+		return
+	}
+
+	// Read the command from the request body.
+
+	peers := []string{}
+	if err := json.NewDecoder(r.Body).Decode(&peers); err != nil {
+		h.httpError(err, w, http.StatusInternalServerError)
+		return
+	}
+
+	node, err := h.store.joinCluster(peers)
+	if err != nil {
+		h.httpError(err, w, http.StatusInternalServerError)
+		return
+	}
+
+	// Return the node with newly assigned ID as json
+	w.Header().Add("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(node); err != nil {
+		h.httpError(err, w, http.StatusInternalServerError)
+	}
 }
 
 func validateCommand(b []byte) error {
@@ -322,6 +433,22 @@ func (h *handler) servePeers(w http.ResponseWriter, r *http.Request) {
 	w.Header().Add("Content-Type", "application/json")
 	enc := json.NewEncoder(w)
 	if err := enc.Encode(h.store.peers()); err != nil {
+		h.httpError(err, w, http.StatusInternalServerError)
+	}
+}
+
+func (h *handler) serveMetaServers(w http.ResponseWriter, r *http.Request) {
+	w.Header().Add("Content-Type", "application/json")
+	enc := json.NewEncoder(w)
+	if err := enc.Encode(h.store.metaServersHTTP()); err != nil {
+		h.httpError(err, w, http.StatusInternalServerError)
+	}
+}
+
+func (h *handler) serveDataServers(w http.ResponseWriter, r *http.Request) {
+	w.Header().Add("Content-Type", "application/json")
+	enc := json.NewEncoder(w)
+	if err := enc.Encode(h.store.dataServers()); err != nil {
 		h.httpError(err, w, http.StatusInternalServerError)
 	}
 }
@@ -444,17 +571,17 @@ func requestID(inner http.Handler) http.Handler {
 	})
 }
 
-func logging(inner http.Handler, name string, weblog *log.Logger) http.Handler {
+func logging(inner http.Handler, name string, weblog *zap.Logger) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
 		l := &responseLogger{w: w}
 		inner.ServeHTTP(l, r)
 		logLine := buildLogLine(l, r, start)
-		weblog.Println(logLine)
+		weblog.Info(logLine)
 	})
 }
 
-func recovery(inner http.Handler, name string, weblog *log.Logger) http.Handler {
+func recovery(inner http.Handler, name string, weblog *zap.Logger) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
 		l := &responseLogger{w: w}
@@ -465,7 +592,7 @@ func recovery(inner http.Handler, name string, weblog *log.Logger) http.Handler 
 				runtime.Stack(b, false)
 				logLine := buildLogLine(l, r, start)
 				logLine = fmt.Sprintf("%s [panic:%s]\n%s", logLine, err, string(b))
-				weblog.Println(logLine)
+				weblog.Info(logLine)
 			}
 		}()
 
@@ -475,7 +602,7 @@ func recovery(inner http.Handler, name string, weblog *log.Logger) http.Handler 
 
 func (h *handler) httpError(err error, w http.ResponseWriter, status int) {
 	if h.loggingEnabled {
-		h.logger.Println(err)
+		h.logger.Info("httpError", zap.Error(err))
 	}
 	http.Error(w, "", status)
 }

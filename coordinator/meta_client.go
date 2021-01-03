@@ -1,9 +1,9 @@
-package cluster
+package coordinator
 
 import (
 	"time"
 
-	"github.com/freetsdb/freetsdb/influxql"
+	"github.com/freetsdb/freetsdb/services/influxql"
 	"github.com/freetsdb/freetsdb/services/meta"
 )
 

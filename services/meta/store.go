@@ -20,7 +20,7 @@ import (
 
 // Retention policy settings.
 const (
-	autoCreateRetentionPolicyName   = "default"
+	autoCreateRetentionPolicyName   = "autogen"
 	autoCreateRetentionPolicyPeriod = 0
 
 	// maxAutoCreatedRetentionPolicyReplicaN is the maximum replication factor that will
@@ -229,7 +229,6 @@ func (s *store) openRaft(initializePeers []string, raftln net.Listener) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	rs := newRaftState(s.config, s.raftAddr)
-	rs.logger = s.logger
 	rs.path = s.path
 
 	if err := rs.open(s, raftln, initializePeers); err != nil {
@@ -320,7 +319,7 @@ func (s *store) leader() string {
 	if s.raftState == nil || s.raftState.raft == nil {
 		return ""
 	}
-	return s.raftState.raft.Leader()
+	return string(s.raftState.raft.Leader())
 }
 
 // leaderHTTP returns the HTTP API connection info for the metanode
@@ -334,7 +333,7 @@ func (s *store) leaderHTTP() string {
 	l := s.raftState.raft.Leader()
 
 	for _, n := range s.data.MetaNodes {
-		if n.TCPHost == l {
+		if n.TCPHost == string(l) {
 			return n.Host
 		}
 	}
@@ -357,6 +356,30 @@ func (s *store) otherMetaServersHTTP() []string {
 	return a
 }
 
+// metaServersHTTP will return the HTTP bind addresses of all
+// meta servers in the cluster
+func (s *store) metaServersHTTP() []string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	var a []string
+	for _, n := range s.data.MetaNodes {
+		a = append(a, n.Host)
+	}
+	return a
+}
+
+func (s *store) dataServers() []string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	var a []string
+	for _, n := range s.data.DataNodes {
+		a = append(a, n.TCPHost)
+	}
+	return a
+}
+
 // index returns the current store index.
 func (s *store) index() uint64 {
 	s.mu.RLock()
@@ -373,13 +396,41 @@ func (s *store) apply(b []byte) error {
 }
 
 // join adds a new server to the metaservice and raft
-func (s *store) join(n *NodeInfo) (*NodeInfo, error) {
+func (s *store) joinMeta(n *NodeInfo) (*NodeInfo, error) {
+
 	s.mu.RLock()
 	if s.raftState == nil {
 		s.mu.RUnlock()
 		return nil, fmt.Errorf("store not open")
 	}
-	if err := s.raftState.addPeer(n.TCPHost); err != nil {
+	if err := s.raftState.addVoter(n.TCPHost); err != nil {
+		s.mu.RUnlock()
+		return nil, err
+	}
+	s.mu.RUnlock()
+
+	if err := s.createMetaNode(n.Host, n.TCPHost); err != nil {
+		return nil, err
+	}
+
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for _, node := range s.data.MetaNodes {
+		if node.TCPHost == n.TCPHost && node.Host == n.Host {
+			return &node, nil
+		}
+	}
+
+	return nil, ErrNodeNotFound
+}
+
+func (s *store) joinData(n *NodeInfo) (*NodeInfo, error) {
+	s.mu.RLock()
+	if s.raftState == nil {
+		s.mu.RUnlock()
+		return nil, fmt.Errorf("store not open")
+	}
+	if err := s.raftState.addVoter(n.TCPHost); err != nil {
 		s.mu.RUnlock()
 		return nil, err
 	}
@@ -399,9 +450,35 @@ func (s *store) join(n *NodeInfo) (*NodeInfo, error) {
 	return nil, ErrNodeNotFound
 }
 
+func (s *store) joinCluster(peers []string) (*NodeInfo, error) {
+
+	if len(peers) > 0 {
+		c := NewClient()
+		c.SetMetaServers(peers)
+		c.SetTLS(s.config.HTTPSEnabled)
+
+		if err := c.Open(); err != nil {
+			return nil, err
+		}
+		defer c.Close()
+
+		n, err := c.JoinMetaServer(s.httpAddr, s.raftAddr)
+		if err != nil {
+			return nil, err
+		}
+		s.node.ID = n.ID
+		if err := s.node.Save(); err != nil {
+			return nil, err
+		}
+		return n, nil
+	}
+
+	return nil, fmt.Errorf("Empty peers!")
+}
+
 // leave removes a server from the metaservice and raft
 func (s *store) leave(n *NodeInfo) error {
-	return s.raftState.removePeer(n.TCPHost)
+	return s.raftState.removeVoter(n.TCPHost)
 }
 
 // createMetaNode is used by the join command to create the metanode int

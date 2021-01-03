@@ -7,9 +7,9 @@ import (
 	"time"
 
 	"github.com/gogo/protobuf/proto"
-	"github.com/hashicorp/raft"
-	"github.com/freetsdb/freetsdb/influxql"
+	"github.com/freetsdb/freetsdb/services/influxql"
 	"github.com/freetsdb/freetsdb/services/meta/internal"
+	"github.com/hashicorp/raft"
 )
 
 // storeFSM represents the finite state machine used by Store to interact with Raft.
@@ -112,10 +112,10 @@ func (fsm *storeFSM) applyRemovePeerCommand(cmd *internal.Command) interface{} {
 
 	// Only do this if you are the leader
 	if fsm.raftState.isLeader() {
-		//Remove that node from the peer
-		fsm.logger.Printf("removing peer: %s", addr)
-		if err := fsm.raftState.removePeer(addr); err != nil {
-			fsm.logger.Printf("error removing peer: %s", err)
+		//Remove that node from the Voter
+		fsm.logger.Printf("removing voter: %s", addr)
+		if err := fsm.raftState.removeVoter(addr); err != nil {
+			fsm.logger.Printf("error removing Voter: %s", err)
 		}
 	}
 

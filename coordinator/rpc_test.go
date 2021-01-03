@@ -1,4 +1,4 @@
-package cluster
+package coordinator
 
 import (
 	"errors"
@@ -7,7 +7,7 @@ import (
 	"time"
 
 	"github.com/davecgh/go-spew/spew"
-	"github.com/freetsdb/freetsdb/influxql"
+	"github.com/freetsdb/freetsdb/services/influxql"
 )
 
 func TestWriteShardRequestBinary(t *testing.T) {

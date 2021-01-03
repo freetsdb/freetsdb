@@ -1,16 +1,15 @@
-package cluster
+package coordinator
 
 import (
 	"fmt"
-	"log"
 	"net"
-	"os"
 	"sync"
 	"time"
 
 	"github.com/freetsdb/freetsdb"
-	"github.com/freetsdb/freetsdb/influxql"
+	"github.com/freetsdb/freetsdb/services/influxql"
 	"github.com/freetsdb/freetsdb/services/meta"
+	"go.uber.org/zap"
 )
 
 const (
@@ -24,7 +23,7 @@ type MetaExecutor struct {
 	timeout        time.Duration
 	pool           *clientPool
 	maxConnections int
-	Logger         *log.Logger
+	Logger         *zap.Logger
 	Node           *freetsdb.Node
 
 	nodeExecutor interface {
@@ -43,7 +42,7 @@ func NewMetaExecutor() *MetaExecutor {
 		timeout:        metaExecutorWriteTimeout,
 		pool:           newClientPool(),
 		maxConnections: metaExecutorMaxWriteConnections,
-		Logger:         log.New(os.Stderr, "[meta-executor] ", log.LstdFlags),
+		Logger:         zap.NewNop(),
 	}
 	m.nodeExecutor = m
 
@@ -59,6 +58,10 @@ type remoteNodeError struct {
 
 func (e remoteNodeError) Error() string {
 	return fmt.Sprintf("partial success, node %d may be down (%s)", e.id, e.err)
+}
+
+func (m *MetaExecutor) WithLogger(log *zap.Logger) {
+	m.Logger = log.With(zap.String("coordinator", "meta-executor"))
 }
 
 // ExecuteStatement executes a single InfluxQL statement on all nodes in the cluster concurrently.

@@ -14,7 +14,7 @@ import (
 
 	"github.com/freetsdb/freetsdb/client"
 	"github.com/freetsdb/freetsdb/cmd/freets/cli"
-	"github.com/freetsdb/freetsdb/influxql"
+	"github.com/freetsdb/freetsdb/services/influxql"
 	"github.com/peterh/liner"
 )
 

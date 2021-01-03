@@ -20,7 +20,7 @@ import (
 	"text/tabwriter"
 
 	"github.com/freetsdb/freetsdb/client"
-	"github.com/freetsdb/freetsdb/cluster"
+	"github.com/freetsdb/freetsdb/coordinator"
 	"github.com/peterh/liner"
 )
 
@@ -378,7 +378,7 @@ func (c *CommandLine) SetWriteConsistency(cmd string) {
 	// normalize cmd
 	cmd = strings.ToLower(cmd)
 
-	_, err := cluster.ParseConsistencyLevel(cmd)
+	_, err := coordinator.ParseConsistencyLevel(cmd)
 	if err != nil {
 		fmt.Printf("Unknown consistency level %q. Please use any, one, quorum, or all.\n", cmd)
 		return

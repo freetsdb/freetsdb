@@ -1,10 +1,10 @@
-package cluster_test
+package coordinator_test
 
 import (
 	"fmt"
 	"testing"
 
-	"github.com/freetsdb/freetsdb/cluster"
+	"github.com/freetsdb/freetsdb/coordinator"
 	"github.com/freetsdb/freetsdb/services/meta"
 )
 

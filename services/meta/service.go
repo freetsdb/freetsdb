@@ -3,15 +3,14 @@ package meta // import "github.com/freetsdb/freetsdb/services/meta"
 import (
 	"crypto/tls"
 	"fmt"
-	"io/ioutil"
-	"log"
 	"net"
 	"net/http"
-	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/freetsdb/freetsdb"
+	"go.uber.org/zap"
 )
 
 const (
@@ -23,6 +22,7 @@ type Service struct {
 
 	Version string
 
+	mu       sync.RWMutex
 	config   *Config
 	handler  *handler
 	ln       net.Listener
@@ -31,7 +31,7 @@ type Service struct {
 	https    bool
 	cert     string
 	err      chan error
-	Logger   *log.Logger
+	Logger   *zap.Logger
 	store    *store
 
 	Node *freetsdb.Node
@@ -43,22 +43,25 @@ func NewService(c *Config) *Service {
 		config:   c,
 		httpAddr: c.HTTPBindAddress,
 		raftAddr: c.BindAddress,
+		Logger:   zap.NewNop(),
 		https:    c.HTTPSEnabled,
 		cert:     c.HTTPSCertificate,
 		err:      make(chan error),
-	}
-	if c.LoggingEnabled {
-		s.Logger = log.New(os.Stderr, "[meta] ", log.LstdFlags)
-	} else {
-		s.Logger = log.New(ioutil.Discard, "", 0)
 	}
 
 	return s
 }
 
+// WithLogger sets the logger for the client.
+func (s *Service) WithLogger(log *zap.Logger) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.Logger = log.With(zap.String("service", "metaservice"))
+}
+
 // Open starts the service
 func (s *Service) Open() error {
-	s.Logger.Println("Starting meta service")
+	s.Logger.Info("Starting meta service")
 
 	if s.RaftListener == nil {
 		panic("no raft listener set")
@@ -78,7 +81,7 @@ func (s *Service) Open() error {
 			return err
 		}
 
-		s.Logger.Println("Listening on HTTPS:", listener.Addr().String())
+		s.Logger.Info("Listening on", zap.String("HTTPS", listener.Addr().String()))
 		s.ln = listener
 	} else {
 		listener, err := net.Listen("tcp", s.httpAddr)
@@ -86,7 +89,7 @@ func (s *Service) Open() error {
 			return err
 		}
 
-		s.Logger.Println("Listening on HTTP:", listener.Addr().String())
+		s.Logger.Info("Listening on", zap.String("HTTPS", listener.Addr().String()))
 		s.ln = listener
 	}
 
@@ -119,7 +122,7 @@ func (s *Service) Open() error {
 	s.store.node = s.Node
 
 	handler := newHandler(s.config, s)
-	handler.logger = s.Logger
+	handler.WithLogger(s.Logger)
 	handler.store = s.store
 	s.handler = handler
 
@@ -186,11 +189,6 @@ func (s *Service) RaftAddr() string {
 
 // Err returns a channel for fatal errors that occur on the listener.
 func (s *Service) Err() <-chan error { return s.err }
-
-// SetLogger sets the internal logger to the logger passed in.
-func (s *Service) SetLogger(l *log.Logger) {
-	s.Logger = l
-}
 
 func autoAssignPort(addr string) bool {
 	_, p, _ := net.SplitHostPort(addr)

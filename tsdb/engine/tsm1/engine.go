@@ -415,18 +415,12 @@ func (e *Engine) WriteSnapshot() error {
 	// Lock and grab the cache snapshot along with all the closed WAL
 	// filenames associated with the snapshot
 	started := time.Now()
-	// hanj, debug , FIXME
-	//log, logEnd := logger.NewOperation(e.logger, "Cache snapshot", "tsm1_cache_snapshot")
 	e.logger.Printf("Cache snapshot, tsm1_cache_snapshot")
 	defer func() {
 		elapsed := time.Since(started)
 		e.Cache.UpdateCompactTime(elapsed)
 
-		//if err == nil {
-		//log.Info("Snapshot for path written", zap.String("path", e.path), zap.Duration("duration", elapsed))
 		e.logger.Printf("Snapshot for path written, path: %v, duration: %v", e.path, elapsed)
-		//}
-		//logEnd()
 	}()
 
 	closedFiles, snapshot, compactor, err := func() ([]string, *Cache, *Compactor, error) {

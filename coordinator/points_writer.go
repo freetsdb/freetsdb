@@ -1,11 +1,9 @@
-package cluster
+package coordinator
 
 import (
 	"errors"
 	"expvar"
 	"fmt"
-	"log"
-	"os"
 	"strings"
 	"sync"
 	"time"
@@ -14,6 +12,7 @@ import (
 	"github.com/freetsdb/freetsdb/models"
 	"github.com/freetsdb/freetsdb/services/meta"
 	"github.com/freetsdb/freetsdb/tsdb"
+	"go.uber.org/zap"
 )
 
 // ConsistencyLevel represent a required replication criteria before a write can
@@ -86,7 +85,7 @@ type PointsWriter struct {
 	mu           sync.RWMutex
 	closing      chan struct{}
 	WriteTimeout time.Duration
-	Logger       *log.Logger
+	Logger       *zap.Logger
 
 	Node *freetsdb.Node
 
@@ -123,7 +122,7 @@ func NewPointsWriter() *PointsWriter {
 	return &PointsWriter{
 		closing:      make(chan struct{}),
 		WriteTimeout: DefaultWriteTimeout,
-		Logger:       log.New(os.Stderr, "[write] ", log.LstdFlags),
+		Logger:       zap.NewNop(),
 		statMap:      freetsdb.NewStatistics("write", "write", nil),
 	}
 }
@@ -151,6 +150,11 @@ func (s *ShardMapping) MapPoint(shardInfo *meta.ShardInfo, p models.Point) {
 		s.Points[shardInfo.ID] = append(points, p)
 	}
 	s.Shards[shardInfo.ID] = shardInfo
+}
+
+// WithLogger sets the Logger on w.
+func (w *PointsWriter) WithLogger(log *zap.Logger) {
+	w.Logger = log.With(zap.String("coordinator", "write"))
 }
 
 // Open opens the communication channel with the point writer
@@ -367,7 +371,10 @@ func (w *PointsWriter) writeToShard(shard *meta.ShardInfo, database, retentionPo
 			// If the write returned an error, continue to the next response
 			if result.Err != nil {
 				w.statMap.Add(statWriteErr, 1)
-				w.Logger.Printf("write failed for shard %d on node %d: %v", shard.ID, result.Owner.NodeID, result.Err)
+				w.Logger.Info("Write failed",
+					zap.Uint64("shard", shard.ID),
+					zap.Uint64("node", result.Owner.NodeID),
+					zap.Error(result.Err))
 
 				// Keep track of the first error we see to return back to the client
 				if writeError == nil {

@@ -3,13 +3,13 @@ package meta
 import (
 	"fmt"
 	"io/ioutil"
-	"log"
 	"net"
 	"os"
 	"path/filepath"
 	"sync"
 	"time"
 
+	"github.com/hashicorp/go-hclog"
 	"github.com/hashicorp/raft"
 	"github.com/hashicorp/raft-boltdb"
 )
@@ -30,12 +30,12 @@ type raftState struct {
 	closing   chan struct{}
 	raft      *raft.Raft
 	transport *raft.NetworkTransport
-	peerStore raft.PeerStore
+	peerStore *PeerStore
 	raftStore *raftboltdb.BoltStore
 	raftLayer *raftLayer
 	ln        net.Listener
 	addr      string
-	logger    *log.Logger
+	logger    hclog.Logger
 	path      string
 }
 
@@ -43,6 +43,10 @@ func newRaftState(c *Config, addr string) *raftState {
 	return &raftState{
 		config: c,
 		addr:   addr,
+		logger: hclog.New(&hclog.LoggerOptions{
+			Name:  "raft-state",
+			Level: hclog.LevelFromString("INFO"),
+		}),
 	}
 }
 
@@ -52,7 +56,10 @@ func (r *raftState) open(s *store, ln net.Listener, initializePeers []string) er
 
 	// Setup raft configuration.
 	config := raft.DefaultConfig()
+	config.LocalID = raft.ServerID(s.raftAddr)
 	config.LogOutput = ioutil.Discard
+
+	newNode := !pathExists(filepath.Join(r.path, "raft.db"))
 
 	if r.config.ClusterTracing {
 		config.Logger = r.logger
@@ -72,31 +79,27 @@ func (r *raftState) open(s *store, ln net.Listener, initializePeers []string) er
 	r.transport = raft.NewNetworkTransport(r.raftLayer, 3, 10*time.Second, config.LogOutput)
 
 	// Create peer storage.
-	r.peerStore = &peerStore{}
+	r.peerStore = &PeerStore{}
 
 	// This server is joining the raft cluster for the first time if initializePeers are passed in
 	if len(initializePeers) > 0 {
-		if err := r.peerStore.SetPeers(initializePeers); err != nil {
+		if err := r.SetPeers(initializePeers); err != nil {
 			return err
 		}
 	}
 
-	peers, err := r.peerStore.Peers()
+	peers, err := r.Peers()
 	if err != nil {
 		return err
 	}
 
 	// If no peers are set in the config or there is one and we are it, then start as a single server.
 	if len(initializePeers) <= 1 {
-		config.EnableSingleNode = true
-
-		// Ensure we can always become the leader
-		config.DisableBootstrapAfterElect = false
 
 		// Make sure our peer address is here.  This happens with either a single node cluster
 		// or a node joining the cluster, as no one else has that information yet.
-		if !raft.PeerContained(peers, r.addr) {
-			if err := r.peerStore.SetPeers([]string{r.addr}); err != nil {
+		if !PeerContained(peers, r.addr) {
+			if err := r.SetPeers([]string{r.addr}); err != nil {
 				return err
 			}
 		}
@@ -118,11 +121,27 @@ func (r *raftState) open(s *store, ln net.Listener, initializePeers []string) er
 	}
 
 	// Create raft log.
-	ra, err := raft.NewRaft(config, (*storeFSM)(s), store, store, snapshots, r.peerStore, r.transport)
+	ra, err := raft.NewRaft(config, (*storeFSM)(s), store, store, snapshots, r.transport)
 	if err != nil {
 		return fmt.Errorf("new raft: %s", err)
 	}
 	r.raft = ra
+
+	if newNode {
+		r.logger.Info("bootstrap needed")
+		configuration := raft.Configuration{
+			Servers: []raft.Server{
+				{
+					ID:      config.LocalID,
+					Address: r.transport.LocalAddr(),
+				},
+			},
+		}
+
+		ra.BootstrapCluster(configuration)
+	} else {
+		r.logger.Info("no bootstrap needed")
+	}
 
 	r.wg.Add(1)
 	go r.logLeaderChanges()
@@ -133,7 +152,7 @@ func (r *raftState) open(s *store, ln net.Listener, initializePeers []string) er
 func (r *raftState) logLeaderChanges() {
 	defer r.wg.Done()
 	// Logs our current state (Node at 1.2.3.4:8088 [Follower])
-	r.logger.Printf(r.raft.String())
+	r.logger.Info(r.raft.String())
 	for {
 		select {
 		case <-r.closing:
@@ -141,9 +160,9 @@ func (r *raftState) logLeaderChanges() {
 		case <-r.raft.LeaderCh():
 			peers, err := r.peers()
 			if err != nil {
-				r.logger.Printf("failed to lookup peers: %v", err)
+				r.logger.Info("failed to lookup peers", "error", err)
 			}
-			r.logger.Printf("%v. peers=%v", r.raft.String(), peers)
+			r.logger.Info(r.raft.String(), "peers", peers)
 		}
 	}
 }
@@ -208,57 +227,62 @@ func (r *raftState) snapshot() error {
 	return future.Error()
 }
 
-// addPeer adds addr to the list of peers in the cluster.
-func (r *raftState) addPeer(addr string) error {
-	peers, err := r.peerStore.Peers()
-	if err != nil {
+// addVoter adds addr to the list of peers in the cluster.
+func (r *raftState) addVoter(addr string) error {
+
+	configFuture := r.raft.GetConfiguration()
+	if err := configFuture.Error(); err != nil {
+		r.logger.Info("failed to get raft configuration", "error", err)
 		return err
 	}
 
-	for _, p := range peers {
-		if addr == p {
+	for _, srv := range configFuture.Configuration().Servers {
+		if srv.Address == raft.ServerAddress(addr) {
 			return nil
+
 		}
 	}
 
-	if fut := r.raft.AddPeer(addr); fut.Error() != nil {
-		return fut.Error()
+	f := r.raft.AddVoter(raft.ServerID(addr), raft.ServerAddress(addr), 0, 0)
+	if f.Error() != nil {
+		return f.Error()
 	}
+
 	return nil
 }
 
-// removePeer removes addr from the list of peers in the cluster.
-func (r *raftState) removePeer(addr string) error {
+// removeVoter removes addr from the list of peers in the cluster.
+func (r *raftState) removeVoter(addr string) error {
+
 	// Only do this on the leader
 	if !r.isLeader() {
 		return raft.ErrNotLeader
 	}
 
-	peers, err := r.peerStore.Peers()
-	if err != nil {
+	configFuture := r.raft.GetConfiguration()
+	if err := configFuture.Error(); err != nil {
+		r.logger.Info("failed to get raft configuration", "error", err)
 		return err
 	}
 
-	var exists bool
-	for _, p := range peers {
-		if addr == p {
-			exists = true
+	for _, srv := range configFuture.Configuration().Servers {
+		// If a node already exists with either the joining node's ID or address,
+		// that node may need to be removed from the config first.
+		if srv.Address == raft.ServerAddress(addr) {
+			future := r.raft.RemoveServer(srv.ID, 0, 0)
+			if err := future.Error(); err != nil {
+				return fmt.Errorf("error removing existing node %s at %s: %s", srv.ID, addr, err)
+			}
+
 			break
 		}
 	}
 
-	if !exists {
-		return nil
-	}
-
-	if fut := r.raft.RemovePeer(addr); fut.Error() != nil {
-		return fut.Error()
-	}
 	return nil
 }
 
 func (r *raftState) peers() ([]string, error) {
-	return r.peerStore.Peers()
+	return r.Peers()
 }
 
 func (r *raftState) leader() string {
@@ -266,7 +290,7 @@ func (r *raftState) leader() string {
 		return ""
 	}
 
-	return r.raft.Leader()
+	return string(r.raft.Leader())
 }
 
 func (r *raftState) isLeader() bool {
@@ -312,8 +336,8 @@ func (l *raftLayer) Addr() net.Addr {
 }
 
 // Dial creates a new network connection.
-func (l *raftLayer) Dial(addr string, timeout time.Duration) (net.Conn, error) {
-	conn, err := net.DialTimeout("tcp", addr, timeout)
+func (l *raftLayer) Dial(addr raft.ServerAddress, timeout time.Duration) (net.Conn, error) {
+	conn, err := net.DialTimeout("tcp", string(addr), timeout)
 	if err != nil {
 		return nil, err
 	}
@@ -332,21 +356,55 @@ func (l *raftLayer) Accept() (net.Conn, error) { return l.ln.Accept() }
 // Close closes the layer.
 func (l *raftLayer) Close() error { return l.ln.Close() }
 
-// peerStore is an in-memory implementation of raft.PeerStore
-type peerStore struct {
+// PeerStore is an in-memory implementation of raft.PeerStore
+type PeerStore struct {
 	mu    sync.RWMutex
 	peers []string
 }
 
-func (m *peerStore) Peers() ([]string, error) {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	return m.peers, nil
+func (r *raftState) Peers() ([]string, error) {
+	r.peerStore.mu.RLock()
+	defer r.peerStore.mu.RUnlock()
+
+	if r.raft == nil {
+		return []string{}, nil
+	}
+
+	configFuture := r.raft.GetConfiguration()
+	if err := configFuture.Error(); err != nil {
+		return nil, err
+	}
+
+	peers := []string{}
+	for _, srv := range configFuture.Configuration().Servers {
+		peers = append(peers, string(srv.Address))
+	}
+
+	return peers, nil
+
 }
 
-func (m *peerStore) SetPeers(peers []string) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.peers = peers
+func (r *raftState) SetPeers(peers []string) error {
+	r.peerStore.mu.Lock()
+	defer r.peerStore.mu.Unlock()
+	r.peerStore.peers = peers
 	return nil
+}
+
+// PeerContained checks if a given peer is contained in a list.
+func PeerContained(peers []string, peer string) bool {
+	for _, p := range peers {
+		if p == peer {
+			return true
+		}
+	}
+	return false
+}
+
+// pathExists returns true if the given path exists.
+func pathExists(p string) bool {
+	if _, err := os.Lstat(p); err != nil && os.IsNotExist(err) {
+		return false
+	}
+	return true
 }

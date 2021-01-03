@@ -11,7 +11,7 @@ import (
 
 // These variables are populated via the Go linker.
 var (
-	version = "0.9"
+	version = "0.1"
 )
 
 const (

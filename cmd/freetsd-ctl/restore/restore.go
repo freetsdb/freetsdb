@@ -9,14 +9,13 @@ import (
 	"fmt"
 	"io"
 	"io/ioutil"
-	"log"
 	"net"
 	"os"
 	"path/filepath"
 	"strconv"
 	"sync"
 
-	"github.com/freetsdb/freetsdb/cmd/freetsd/backup"
+	"github.com/freetsdb/freetsdb/cmd/freetsd-ctl/backup"
 	"github.com/freetsdb/freetsdb/services/meta"
 	"github.com/freetsdb/freetsdb/services/snapshotter"
 )
@@ -217,7 +216,7 @@ func (cmd *Command) unpackMeta() error {
 	client := meta.NewClient()
 	client.SetMetaServers([]string{store.HTTPAddr()})
 	client.SetTLS(false)
-	client.SetLogger(log.New(ioutil.Discard, "", 0))
+
 	if err := client.Open(); err != nil {
 		return err
 	}

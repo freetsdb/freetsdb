@@ -1,6 +1,7 @@
 package run
 
 import (
+	"encoding/json"
 	"fmt"
 	"log"
 	"net"
@@ -8,10 +9,12 @@ import (
 	"path/filepath"
 	"runtime"
 	"runtime/pprof"
+	"strings"
 	"time"
 
 	"github.com/freetsdb/freetsdb"
-	"github.com/freetsdb/freetsdb/cluster"
+	"github.com/freetsdb/freetsdb/coordinator"
+	"github.com/freetsdb/freetsdb/logger"
 	"github.com/freetsdb/freetsdb/models"
 	"github.com/freetsdb/freetsdb/monitor"
 	"github.com/freetsdb/freetsdb/services/collectd"
@@ -29,12 +32,16 @@ import (
 	"github.com/freetsdb/freetsdb/services/udp"
 	"github.com/freetsdb/freetsdb/tcp"
 	"github.com/freetsdb/freetsdb/tsdb"
-	client "github.com/influxdata/usage-client/v1"
+	client "github.com/freetsdb/freetsdb/usage-client"
+	"go.uber.org/zap"
+
 	// Initialize the engine packages
 	_ "github.com/freetsdb/freetsdb/tsdb/engine"
 )
 
 var startTime time.Time
+
+const NodeMuxHeader = 9
 
 func init() {
 	startTime = time.Now().UTC()
@@ -57,25 +64,28 @@ type Server struct {
 	err     chan error
 	closing chan struct{}
 
-	BindAddress string
-	Listener    net.Listener
+	BindAddress  string
+	Listener     net.Listener
+	NodeListener net.Listener
 
-	Node *freetsdb.Node
+	Logger *zap.Logger
 
-	MetaClient  *meta.Client
-	MetaService *meta.Service
+	Node    *freetsdb.Node
+	NewNode bool
+
+	MetaClient *meta.Client
 
 	TSDBStore     *tsdb.Store
-	QueryExecutor *cluster.QueryExecutor
-	PointsWriter  *cluster.PointsWriter
-	ShardWriter   *cluster.ShardWriter
+	QueryExecutor *coordinator.QueryExecutor
+	PointsWriter  *coordinator.PointsWriter
+	ShardWriter   *coordinator.ShardWriter
 	HintedHandoff *hh.Service
 	Subscriber    *subscriber.Service
 
 	Services []Service
 
 	// These references are required for the tcp muxer.
-	ClusterService     *cluster.Service
+	CoordinatorService *coordinator.Service
 	SnapshotterService *snapshotter.Service
 	CopierService      *copier.Service
 
@@ -111,15 +121,15 @@ func NewServer(c *Config, buildInfo *BuildInfo) (*Server, error) {
 	// We need to ensure that a meta directory always exists even if
 	// we don't start the meta store.  node.json is always stored under
 	// the meta directory.
-	if err := os.MkdirAll(c.Meta.Dir, 0777); err != nil {
+	if err := os.MkdirAll(c.Data.Dir, 0777); err != nil {
 		return nil, fmt.Errorf("mkdir all: %s", err)
 	}
 
 	// 0.10-rc1 and prior would sometimes put the node.json at the root
 	// dir which breaks backup/restore and restarting nodes.  This moves
 	// the file from the root so it's always under the meta dir.
-	oldPath := filepath.Join(filepath.Dir(c.Meta.Dir), "node.json")
-	newPath := filepath.Join(c.Meta.Dir, "node.json")
+	oldPath := filepath.Join(filepath.Dir(c.Data.Dir), "node.json")
+	newPath := filepath.Join(c.Data.Dir, "node.json")
 
 	if _, err := os.Stat(oldPath); err == nil {
 		if err := os.Rename(oldPath, newPath); err != nil {
@@ -127,26 +137,22 @@ func NewServer(c *Config, buildInfo *BuildInfo) (*Server, error) {
 		}
 	}
 
-	node, err := freetsdb.LoadNode(c.Meta.Dir)
+	newNode := false
+	node, err := freetsdb.LoadNode(c.Data.Dir)
 	if err != nil {
 		if !os.IsNotExist(err) {
 			return nil, err
 		}
+		newNode = true
 
-		node = freetsdb.NewNode(c.Meta.Dir)
+		node = freetsdb.NewNode(c.Data.Dir)
 	}
 
-	// In 0.10.0 bind-address got moved to the top level. Check
-	// The old location to keep things backwards compatible
+	if !c.Data.Enabled {
+		return nil, fmt.Errorf("Must run as data node")
+	}
+
 	bind := c.BindAddress
-	if c.Meta.BindAddress != "" {
-		bind = c.Meta.BindAddress
-	}
-
-	if !c.Data.Enabled && !c.Meta.Enabled {
-		return nil, fmt.Errorf("must run as either meta node or data node or both")
-	}
-
 	s := &Server{
 		buildInfo: *buildInfo,
 		err:       make(chan error),
@@ -154,26 +160,21 @@ func NewServer(c *Config, buildInfo *BuildInfo) (*Server, error) {
 
 		BindAddress: bind,
 
+		Logger: logger.New(os.Stderr),
+
 		Node:       node,
+		NewNode:    newNode,
 		MetaClient: meta.NewClient(),
 
 		Monitor: monitor.New(c.Monitor),
 
 		reportingDisabled: c.ReportingDisabled,
-		joinPeers:         c.Meta.JoinPeers,
-		metaUseTLS:        c.Meta.HTTPSEnabled,
 
 		httpAPIAddr: c.HTTPD.BindAddress,
 		httpUseTLS:  c.HTTPD.HTTPSEnabled,
 		tcpAddr:     bind,
 
 		config: c,
-	}
-
-	if c.Meta.Enabled {
-		s.MetaService = meta.NewService(c.Meta)
-		s.MetaService.Version = s.buildInfo.Version
-		s.MetaService.Node = s.Node
 	}
 
 	if c.Data.Enabled {
@@ -184,8 +185,8 @@ func NewServer(c *Config, buildInfo *BuildInfo) (*Server, error) {
 		s.TSDBStore.EngineOptions.EngineVersion = c.Data.Engine
 
 		// Set the shard writer
-		s.ShardWriter = cluster.NewShardWriter(time.Duration(c.Cluster.ShardWriterTimeout),
-			c.Cluster.MaxRemoteWriteConnections)
+		s.ShardWriter = coordinator.NewShardWriter(time.Duration(c.Coordinator.ShardWriterTimeout),
+			c.Coordinator.MaxRemoteWriteConnections)
 
 		// Create the hinted handoff service
 		s.HintedHandoff = hh.NewService(c.HintedHandoff, s.ShardWriter, s.MetaClient)
@@ -195,8 +196,8 @@ func NewServer(c *Config, buildInfo *BuildInfo) (*Server, error) {
 		s.Subscriber = subscriber.NewService(c.Subscriber)
 
 		// Initialize points writer.
-		s.PointsWriter = cluster.NewPointsWriter()
-		s.PointsWriter.WriteTimeout = time.Duration(c.Cluster.WriteTimeout)
+		s.PointsWriter = coordinator.NewPointsWriter()
+		s.PointsWriter.WriteTimeout = time.Duration(c.Coordinator.WriteTimeout)
 		s.PointsWriter.TSDBStore = s.TSDBStore
 		s.PointsWriter.ShardWriter = s.ShardWriter
 		s.PointsWriter.HintedHandoff = s.HintedHandoff
@@ -204,20 +205,17 @@ func NewServer(c *Config, buildInfo *BuildInfo) (*Server, error) {
 		s.PointsWriter.Node = s.Node
 
 		// Initialize meta executor.
-		metaExecutor := cluster.NewMetaExecutor()
+		metaExecutor := coordinator.NewMetaExecutor()
 		metaExecutor.MetaClient = s.MetaClient
 		metaExecutor.Node = s.Node
 
 		// Initialize query executor.
-		s.QueryExecutor = cluster.NewQueryExecutor()
+		s.QueryExecutor = coordinator.NewQueryExecutor()
 		s.QueryExecutor.MetaClient = s.MetaClient
 		s.QueryExecutor.TSDBStore = s.TSDBStore
 		s.QueryExecutor.Monitor = s.Monitor
 		s.QueryExecutor.PointsWriter = s.PointsWriter
 		s.QueryExecutor.MetaExecutor = metaExecutor
-		if c.Data.QueryLogEnabled {
-			s.QueryExecutor.LogOutput = os.Stderr
-		}
 
 		// Initialize the monitor
 		s.Monitor.Version = s.buildInfo.Version
@@ -230,12 +228,12 @@ func NewServer(c *Config, buildInfo *BuildInfo) (*Server, error) {
 	return s, nil
 }
 
-func (s *Server) appendClusterService(c cluster.Config) {
-	srv := cluster.NewService(c)
+func (s *Server) appendCoordinatorService(c coordinator.Config) {
+	srv := coordinator.NewService(c)
 	srv.TSDBStore = s.TSDBStore
 	srv.MetaClient = s.MetaClient
 	s.Services = append(s.Services, srv)
-	s.ClusterService = srv
+	s.CoordinatorService = srv
 }
 
 func (s *Server) appendSnapshotterService() {
@@ -378,15 +376,7 @@ func (s *Server) Open() error {
 	mux := tcp.NewMux()
 	go mux.Serve(ln)
 
-	if s.MetaService != nil {
-		s.MetaService.RaftListener = mux.Listen(meta.MuxHeader)
-		// Open meta service.
-		if err := s.MetaService.Open(); err != nil {
-			return fmt.Errorf("open meta service: %s", err)
-		}
-		go s.monitorErrorChan(s.MetaService.Err())
-	}
-
+	s.NodeListener = mux.Listen(NodeMuxHeader)
 	// initialize MetaClient.
 	if err = s.initializeMetaClient(); err != nil {
 		return err
@@ -394,7 +384,7 @@ func (s *Server) Open() error {
 
 	if s.TSDBStore != nil {
 		// Append services.
-		s.appendClusterService(s.config.Cluster)
+		s.appendCoordinatorService(s.config.Coordinator)
 		s.appendPrecreatorService(s.config.Precreator)
 		s.appendSnapshotterService()
 		s.appendCopierService()
@@ -423,9 +413,25 @@ func (s *Server) Open() error {
 		s.PointsWriter.MetaClient = s.MetaClient
 		s.Monitor.MetaClient = s.MetaClient
 
-		s.ClusterService.Listener = mux.Listen(cluster.MuxHeader)
+		s.CoordinatorService.Listener = mux.Listen(coordinator.MuxHeader)
 		s.SnapshotterService.Listener = mux.Listen(snapshotter.MuxHeader)
 		s.CopierService.Listener = mux.Listen(copier.MuxHeader)
+
+		// Configure logging for all services and clients.
+		s.MetaClient.WithLogger(s.Logger)
+
+		s.TSDBStore.WithLogger(s.Logger)
+		if s.config.Data.QueryLogEnabled {
+			s.QueryExecutor.WithLogger(s.Logger)
+			s.QueryExecutor.MetaExecutor.WithLogger(s.Logger)
+		}
+		s.PointsWriter.WithLogger(s.Logger)
+		s.Subscriber.WithLogger(s.Logger)
+		for _, svc := range s.Services {
+			svc.WithLogger(s.Logger)
+		}
+		s.SnapshotterService.WithLogger(s.Logger)
+		s.Monitor.WithLogger(s.Logger)
 
 		// Open TSDB store.
 		if err := s.TSDBStore.Open(); err != nil {
@@ -477,6 +483,9 @@ func (s *Server) Close() error {
 	stopProfile()
 
 	// Close the listener first to stop any new connections
+	if s.NodeListener != nil {
+		s.NodeListener.Close()
+	}
 	if s.Listener != nil {
 		s.Listener.Close()
 	}
@@ -506,11 +515,6 @@ func (s *Server) Close() error {
 
 	if s.Subscriber != nil {
 		s.Subscriber.Close()
-	}
-
-	// Finally close the meta-store since everything else depends on it
-	if s.MetaService != nil {
-		s.MetaService.Close()
 	}
 
 	if s.MetaClient != nil {
@@ -604,22 +608,89 @@ func (s *Server) monitorErrorChan(ch <-chan error) {
 	}
 }
 
+const MetaServerInfo = 0x01
+
+type Request struct {
+	Type  uint8
+	Peers []string
+}
+
+func (s *Server) createDataNode() error {
+
+	for {
+		// Wait for next connection.
+		conn, err := s.NodeListener.Accept()
+		if err != nil && strings.Contains(err.Error(), "connection closed") {
+			log.Printf("DATA node listener closed")
+		} else if err != nil {
+			log.Printf("Error accepting DATA node request", err.Error())
+			continue
+		}
+		defer conn.Close()
+
+		var r Request
+		if err := json.NewDecoder(conn).Decode(&r); err != nil {
+			log.Printf("Error reading request", err.Error())
+		}
+
+		switch r.Type {
+		case MetaServerInfo:
+
+			s.MetaClient.SetMetaServers(r.Peers)
+			s.MetaClient.SetTLS(s.metaUseTLS)
+			if err := s.MetaClient.Open(); err != nil {
+				return err
+			}
+
+			// if the node ID is > 0 then we need to initialize the metaclient
+			if s.Node.ID > 0 {
+				s.MetaClient.WaitForDataChanged()
+			}
+
+			if s.config.Data.Enabled {
+				// If we've already created a data node for our id, we're done
+				if _, err := s.MetaClient.DataNode(s.Node.ID); err == nil {
+					return nil
+				}
+
+				n, err := s.MetaClient.CreateDataNode(s.HTTPAddr(), s.TCPAddr())
+				for err != nil {
+					log.Printf("Unable to create data node. retry in 1s: %s", err.Error())
+					time.Sleep(time.Second)
+					n, err = s.MetaClient.CreateDataNode(s.HTTPAddr(), s.TCPAddr())
+				}
+				s.Node.ID = n.ID
+
+				if err := s.Node.Save(); err != nil {
+					return err
+				}
+
+				if err := json.NewEncoder(conn).Encode(n); err != nil {
+					log.Printf("Error reading request", err.Error())
+				}
+			}
+			return nil
+		default:
+			log.Printf("request type unknown: %v", r.Type)
+		}
+
+	}
+
+	return nil
+
+}
+
 // initializeMetaClient will set the MetaClient and join the node to the cluster if needed
 func (s *Server) initializeMetaClient() error {
-	// It's the first time starting up and we need to either join
-	// the cluster or initialize this node as the first member
-	if len(s.joinPeers) == 0 {
-		// start up a new single node cluster
-		if s.MetaService == nil {
-			return fmt.Errorf("server not set to join existing cluster must run also as a meta node")
-		}
-		s.MetaClient.SetMetaServers([]string{s.MetaService.HTTPAddr()})
-		s.MetaClient.SetTLS(s.metaUseTLS)
-	} else {
-		// join this node to the cluster
-		s.MetaClient.SetMetaServers(s.joinPeers)
-		s.MetaClient.SetTLS(s.metaUseTLS)
+
+	if s.NewNode {
+		return s.createDataNode()
 	}
+
+	// load meta info from local
+
+	s.MetaClient.SetTLS(s.metaUseTLS)
+
 	if err := s.MetaClient.Open(); err != nil {
 		return err
 	}
@@ -680,6 +751,7 @@ func (s *Server) MetaServers() []string {
 
 // Service represents a service attached to the server.
 type Service interface {
+	WithLogger(log *zap.Logger)
 	Open() error
 	Close() error
 }
@@ -735,13 +807,13 @@ func (a *tcpaddr) String() string  { return a.host }
 
 // monitorPointsWriter is a wrapper around `cluster.PointsWriter` that helps
 // to prevent a circular dependency between the `cluster` and `monitor` packages.
-type monitorPointsWriter cluster.PointsWriter
+type monitorPointsWriter coordinator.PointsWriter
 
 func (pw *monitorPointsWriter) WritePoints(database, retentionPolicy string, points models.Points) error {
-	return (*cluster.PointsWriter)(pw).WritePoints(&cluster.WritePointsRequest{
+	return (*coordinator.PointsWriter)(pw).WritePoints(&coordinator.WritePointsRequest{
 		Database:         database,
 		RetentionPolicy:  retentionPolicy,
-		ConsistencyLevel: cluster.ConsistencyLevelOne,
+		ConsistencyLevel: coordinator.ConsistencyLevelOne,
 		Points:           points,
 	})
 }

@@ -3,7 +3,7 @@ package meta
 import (
 	"fmt"
 
-	"github.com/freetsdb/freetsdb/influxql"
+	"github.com/freetsdb/freetsdb/services/influxql"
 )
 
 type QueryAuthorizer struct {

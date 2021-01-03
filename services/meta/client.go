@@ -9,18 +9,18 @@ import (
 	"fmt"
 	"io"
 	"io/ioutil"
-	"log"
 	"math"
 	"math/rand"
 	"net/http"
-	"os"
 	"sort"
 	"sync"
 	"time"
 
 	"github.com/freetsdb/freetsdb"
-	"github.com/freetsdb/freetsdb/influxql"
+	"github.com/freetsdb/freetsdb/logger"
+	"github.com/freetsdb/freetsdb/services/influxql"
 	"github.com/freetsdb/freetsdb/services/meta/internal"
+	"go.uber.org/zap"
 
 	"github.com/gogo/protobuf/proto"
 	"golang.org/x/crypto/bcrypt"
@@ -51,7 +51,7 @@ var (
 // a meta service cluster.
 type Client struct {
 	tls    bool
-	logger *log.Logger
+	logger *zap.Logger
 	nodeID uint64
 
 	mu          sync.RWMutex
@@ -74,7 +74,7 @@ type authUser struct {
 func NewClient() *Client {
 	return &Client{
 		cacheData: &Data{},
-		logger:    log.New(os.Stderr, "[metaclient] ", log.LstdFlags),
+		logger:    zap.NewNop(),
 		authCache: make(map[string]authUser, 0),
 	}
 }
@@ -782,9 +782,14 @@ func (c *Client) PrecreateShardGroups(from, to time.Time) error {
 				// Create successive shard group.
 				nextShardGroupTime := g.EndTime.Add(1 * time.Nanosecond)
 				if newGroup, err := c.CreateShardGroup(di.Name, rp.Name, nextShardGroupTime); err != nil {
-					c.logger.Printf("failed to precreate successive shard group for group %d: %s", g.ID, err.Error())
+					c.logger.Info("Failed to precreate successive shard group",
+						zap.Uint64("group_id", g.ID), zap.Error(err))
 				} else {
-					c.logger.Printf("new shard group %d successfully precreated for database %s, retention policy %s", newGroup.ID, di.Name, rp.Name)
+					c.logger.Info("New shard group successfully precreated",
+						logger.ShardGroup(newGroup.ID),
+						logger.Database(di.Name),
+						logger.RetentionPolicy(rp.Name))
+
 				}
 			}
 		}
@@ -848,7 +853,7 @@ func (c *Client) JoinMetaServer(httpAddr, tcpAddr string) (*NodeInfo, error) {
 			server := c.metaServers[currentServer]
 			c.mu.RUnlock()
 
-			url = c.url(server) + "/join"
+			url = c.url(server) + "/add-meta"
 		}
 
 		resp, err := http.Post(url, "application/json", bytes.NewBuffer(b))
@@ -973,10 +978,11 @@ func (c *Client) MarshalBinary() ([]byte, error) {
 	return c.cacheData.MarshalBinary()
 }
 
-func (c *Client) SetLogger(l *log.Logger) {
+// WithLogger sets the logger for the client.
+func (c *Client) WithLogger(log *zap.Logger) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.logger = l
+	c.logger = log.With(zap.String("service", "metaclient"))
 }
 
 func (c *Client) index() uint64 {
@@ -1111,6 +1117,7 @@ func (c *Client) waitForIndex(idx uint64) {
 
 func (c *Client) pollForUpdates() {
 	for {
+
 		data := c.retryUntilSnapshot(c.index())
 		if data == nil {
 			// this will only be nil if the client has been closed,
@@ -1132,6 +1139,7 @@ func (c *Client) pollForUpdates() {
 }
 
 func (c *Client) getSnapshot(server string, index uint64) (*Data, error) {
+
 	resp, err := http.Get(c.url(server) + fmt.Sprintf("?index=%d", index))
 	if err != nil {
 		return nil, err
@@ -1223,7 +1231,9 @@ func (c *Client) retryUntilSnapshot(idx uint64) *Data {
 			return data
 		}
 
-		c.logger.Printf("failure getting snapshot from %s: %s", server, err.Error())
+		c.logger.Info("Failed to get snapshot from %s: %s",
+			zap.String("server", server), zap.Error(err))
+
 		time.Sleep(errSleep)
 
 		currentServer++

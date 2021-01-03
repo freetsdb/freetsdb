@@ -16,7 +16,7 @@ import (
 
 	"github.com/freetsdb/freetsdb"
 
-	"github.com/freetsdb/freetsdb/influxql"
+	"github.com/freetsdb/freetsdb/services/influxql"
 	"github.com/freetsdb/freetsdb/services/meta"
 	"github.com/freetsdb/freetsdb/tcp"
 	"github.com/freetsdb/freetsdb/toml"

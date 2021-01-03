@@ -1,4 +1,4 @@
-package cluster_test
+package coordinator_test
 
 import (
 	"bytes"
@@ -10,9 +10,9 @@ import (
 
 	"github.com/davecgh/go-spew/spew"
 	"github.com/freetsdb/freetsdb"
-	"github.com/freetsdb/freetsdb/cluster"
-	"github.com/freetsdb/freetsdb/influxql"
+	"github.com/freetsdb/freetsdb/coordinator"
 	"github.com/freetsdb/freetsdb/models"
+	"github.com/freetsdb/freetsdb/services/influxql"
 	"github.com/freetsdb/freetsdb/services/meta"
 )
 

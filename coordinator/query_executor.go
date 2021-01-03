@@ -1,13 +1,10 @@
-package cluster
+package coordinator
 
 import (
 	"bytes"
 	"errors"
 	"expvar"
 	"fmt"
-	"io"
-	"io/ioutil"
-	"log"
 	"math/rand"
 	"net"
 	"sort"
@@ -15,10 +12,11 @@ import (
 	"time"
 
 	"github.com/freetsdb/freetsdb"
-	"github.com/freetsdb/freetsdb/influxql"
 	"github.com/freetsdb/freetsdb/models"
 	"github.com/freetsdb/freetsdb/monitor"
+	"github.com/freetsdb/freetsdb/services/influxql"
 	"github.com/freetsdb/freetsdb/services/meta"
+	"go.uber.org/zap"
 )
 
 // A QueryExecutor is responsible for processing a influxql.Query and
@@ -46,7 +44,7 @@ type QueryExecutor struct {
 
 	// Output of all logging.
 	// Defaults to discarding all log output.
-	LogOutput io.Writer
+	Logger *zap.Logger
 
 	// expvar-based stats.
 	statMap *expvar.Map
@@ -61,10 +59,14 @@ const (
 // NewQueryExecutor returns a new instance of QueryExecutor.
 func NewQueryExecutor() *QueryExecutor {
 	return &QueryExecutor{
-		Timeout:   DefaultShardMapperTimeout,
-		LogOutput: ioutil.Discard,
-		statMap:   freetsdb.NewStatistics("queryExecutor", "queryExecutor", nil),
+		Timeout: DefaultShardMapperTimeout,
+		Logger:  zap.NewNop(),
+		statMap: freetsdb.NewStatistics("queryExecutor", "queryExecutor", nil),
 	}
+}
+
+func (e *QueryExecutor) WithLogger(log *zap.Logger) {
+	e.Logger = log.With(zap.String("coordinator", "query"))
 }
 
 // ExecuteQuery executes each statement within a query.
@@ -82,8 +84,6 @@ func (e *QueryExecutor) executeQuery(query *influxql.Query, database string, chu
 		e.statMap.Add(statQueriesActive, -1)
 		e.statMap.Add(statQueryExecutionDuration, time.Since(start).Nanoseconds())
 	}(time.Now())
-
-	logger := e.logger()
 
 	var i int
 	for ; i < len(query.Statements); i++ {
@@ -113,7 +113,7 @@ func (e *QueryExecutor) executeQuery(query *influxql.Query, database string, chu
 		}
 
 		// Log each normalized statement.
-		logger.Println(stmt.String())
+		e.Logger.Info("Executing query", zap.Stringer("query", stmt))
 
 		// Select statements are handled separately so that they can be streamed.
 		if stmt, ok := stmt.(*influxql.SelectStatement); ok {
@@ -823,10 +823,6 @@ func (e *QueryExecutor) executeShowUsersStatement(q *influxql.ShowUsersStatement
 		row.Values = append(row.Values, []interface{}{ui.Name, ui.Admin})
 	}
 	return []*models.Row{row}, nil
-}
-
-func (e *QueryExecutor) logger() *log.Logger {
-	return log.New(e.LogOutput, "[query] ", log.LstdFlags)
 }
 
 func (e *QueryExecutor) writeInto(stmt *influxql.SelectStatement, row *models.Row) error {

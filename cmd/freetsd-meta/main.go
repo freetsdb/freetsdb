@@ -12,8 +12,8 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/freetsdb/freetsdb/cmd/freetsd/help"
-	"github.com/freetsdb/freetsdb/cmd/freetsd/run"
+	"github.com/freetsdb/freetsdb/cmd/freetsd-meta/help"
+	"github.com/freetsdb/freetsdb/cmd/freetsd-meta/run"
 )
 
 // These variables are populated via the Go linker.
@@ -103,8 +103,6 @@ func (m *Main) Run(args ...string) error {
 		case <-cmd.Closed:
 			m.Logger.Println("server shutdown completed")
 		}
-
-		// goodbye.
 
 	case "config":
 		if err := run.NewPrintConfigCommand().Run(args...); err != nil {

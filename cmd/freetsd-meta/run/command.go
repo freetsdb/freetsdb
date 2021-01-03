@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/BurntSushi/toml"
@@ -91,9 +92,23 @@ func (cmd *Command) Run(args ...string) error {
 		return fmt.Errorf("apply env config: %v", err)
 	}
 
+	// Propogate the top-level join options down to the meta config
+	if config.Join != "" {
+		config.Meta.JoinPeers = strings.Split(config.Join, ",")
+	}
+
+	// Command-line flags for -join and -hostname override the config
+	// and env variable
+	if options.Join != "" {
+		config.Meta.JoinPeers = strings.Split(options.Join, ",")
+	}
+
 	if options.Hostname != "" {
 		config.Hostname = options.Hostname
 	}
+
+	// Propogate the top-level hostname down to dependendent configs
+	config.Meta.RemoteHostname = config.Hostname
 
 	// Validate the configuration.
 	if err := config.Validate(); err != nil {

@@ -1,4 +1,4 @@
-package cluster
+package coordinator
 
 import (
 	"encoding"
@@ -6,16 +6,16 @@ import (
 	"expvar"
 	"fmt"
 	"io"
-	"log"
 	"net"
-	"os"
 	"strings"
 	"sync"
 
 	"github.com/freetsdb/freetsdb"
-	"github.com/freetsdb/freetsdb/influxql"
+	"github.com/freetsdb/freetsdb/logger"
+	"github.com/freetsdb/freetsdb/services/influxql"
 	"github.com/freetsdb/freetsdb/services/meta"
 	"github.com/freetsdb/freetsdb/tsdb"
+	"go.uber.org/zap"
 )
 
 // MaxMessageSize defines how large a message can be before we reject it
@@ -55,7 +55,7 @@ type Service struct {
 
 	TSDBStore TSDBStore
 
-	Logger  *log.Logger
+	Logger  *zap.Logger
 	statMap *expvar.Map
 }
 
@@ -63,7 +63,7 @@ type Service struct {
 func NewService(c Config) *Service {
 	return &Service{
 		closing: make(chan struct{}),
-		Logger:  log.New(os.Stderr, "[cluster] ", log.LstdFlags),
+		Logger:  zap.NewNop(),
 		statMap: freetsdb.NewStatistics("cluster", "cluster", nil),
 	}
 }
@@ -71,7 +71,7 @@ func NewService(c Config) *Service {
 // Open opens the network listener and begins serving requests.
 func (s *Service) Open() error {
 
-	s.Logger.Println("Starting cluster service")
+	s.Logger.Info("Starting cluster service")
 	// Begin serving conections.
 	s.wg.Add(1)
 	go s.serve()
@@ -79,9 +79,9 @@ func (s *Service) Open() error {
 	return nil
 }
 
-// SetLogger sets the internal logger to the logger passed in.
-func (s *Service) SetLogger(l *log.Logger) {
-	s.Logger = l
+// WithLogger sets the logger on the service.
+func (s *Service) WithLogger(log *zap.Logger) {
+	s.Logger = log.With(zap.String("coordinator", "service"))
 }
 
 // serve accepts connections from the listener and handles them.
@@ -100,10 +100,10 @@ func (s *Service) serve() {
 		conn, err := s.Listener.Accept()
 		if err != nil {
 			if strings.Contains(err.Error(), "connection closed") {
-				s.Logger.Printf("cluster service accept error: %s", err)
+				s.Logger.Info("Cluster service accept error", zap.Error(err))
 				return
 			}
-			s.Logger.Printf("accept error: %s", err)
+			s.Logger.Info("Accept error", zap.Error(err))
 			continue
 		}
 
@@ -142,9 +142,9 @@ func (s *Service) handleConn(conn net.Conn) {
 		conn.Close()
 	}()
 
-	s.Logger.Printf("accept remote connection from %v\n", conn.RemoteAddr())
+	s.Logger.Info("Accept remote connection", zap.String("remote_addr", conn.RemoteAddr().String()))
 	defer func() {
-		s.Logger.Printf("close remote connection from %v\n", conn.RemoteAddr())
+		s.Logger.Info("Close remote connection", zap.String("remote_addr", conn.RemoteAddr().String()))
 	}()
 	for {
 		// Read type-length-value.
@@ -153,7 +153,7 @@ func (s *Service) handleConn(conn net.Conn) {
 			if strings.HasSuffix(err.Error(), "EOF") {
 				return
 			}
-			s.Logger.Printf("unable to read type: %s", err)
+			s.Logger.Info("Unable to read type", zap.Error(err))
 			return
 		}
 
@@ -162,26 +162,26 @@ func (s *Service) handleConn(conn net.Conn) {
 		case writeShardRequestMessage:
 			buf, err := ReadLV(conn)
 			if err != nil {
-				s.Logger.Printf("unable to read length-value: %s", err)
+				s.Logger.Info("Unable to read length-value", zap.Error(err))
 				return
 			}
 
 			s.statMap.Add(writeShardReq, 1)
 			err = s.processWriteShardRequest(buf)
 			if err != nil {
-				s.Logger.Printf("process write shard error: %s", err)
+				s.Logger.Info("Process write shard error", zap.Error(err))
 			}
 			s.writeShardResponse(conn, err)
 		case executeStatementRequestMessage:
 			buf, err := ReadLV(conn)
 			if err != nil {
-				s.Logger.Printf("unable to read length-value: %s", err)
+				s.Logger.Info("Unable to read length-value", zap.Error(err))
 				return
 			}
 
 			err = s.processExecuteStatementRequest(buf)
 			if err != nil {
-				s.Logger.Printf("process execute statement error: %s", err)
+				s.Logger.Info("Process execute statement error", zap.Error(err))
 			}
 			s.writeShardResponse(conn, err)
 		case createIteratorRequestMessage:
@@ -197,7 +197,7 @@ func (s *Service) handleConn(conn net.Conn) {
 			s.processSeriesKeysRequest(conn)
 			return
 		default:
-			s.Logger.Printf("cluster service message type not found: %d", typ)
+			s.Logger.Info("Cluster service message type not found", zap.Int("type", int(typ)))
 		}
 	}
 }
@@ -252,7 +252,7 @@ func (s *Service) processWriteShardRequest(buf []byte) error {
 	if err == tsdb.ErrShardNotFound {
 		db, rp := req.Database(), req.RetentionPolicy()
 		if db == "" || rp == "" {
-			s.Logger.Printf("drop write request: shard=%d. no database or rentention policy received", req.ShardID())
+			s.Logger.Info("Drop write request, no database or rentention policy received", logger.Shard(req.ShardID()))
 			return nil
 		}
 
@@ -290,13 +290,13 @@ func (s *Service) writeShardResponse(w io.Writer, e error) {
 	// Marshal response to binary.
 	buf, err := resp.MarshalBinary()
 	if err != nil {
-		s.Logger.Printf("error marshalling shard response: %s", err)
+		s.Logger.Info("Error marshalling shard response", zap.Error(err))
 		return
 	}
 
 	// Write to connection.
 	if err := WriteTLV(w, writeShardResponseMessage, buf); err != nil {
-		s.Logger.Printf("write shard response error: %s", err)
+		s.Logger.Info("Write shard response error", zap.Error(err))
 	}
 }
 
@@ -331,14 +331,14 @@ func (s *Service) processCreateIteratorRequest(conn net.Conn) {
 		return nil
 	}(); err != nil {
 		itr.Close()
-		s.Logger.Printf("error reading CreateIterator request: %s", err)
+		s.Logger.Info("Error reading CreateIterator request", zap.Error(err))
 		EncodeTLV(conn, createIteratorResponseMessage, &CreateIteratorResponse{Err: err})
 		return
 	}
 
 	// Encode success response.
 	if err := EncodeTLV(conn, createIteratorResponseMessage, &CreateIteratorResponse{}); err != nil {
-		s.Logger.Printf("error writing CreateIterator response: %s", err)
+		s.Logger.Info("Error writing CreateIterator response", zap.Error(err))
 		return
 	}
 
@@ -349,7 +349,7 @@ func (s *Service) processCreateIteratorRequest(conn net.Conn) {
 
 	// Stream iterator to connection.
 	if err := influxql.NewIteratorEncoder(conn).EncodeIterator(itr); err != nil {
-		s.Logger.Printf("error encoding CreateIterator iterator: %s", err)
+		s.Logger.Info("Error encoding CreateIterator iterator", zap.Error(err))
 		return
 	}
 }
@@ -382,7 +382,7 @@ func (s *Service) processFieldDimensionsRequest(conn net.Conn) {
 
 		return nil
 	}(); err != nil {
-		s.Logger.Printf("error reading FieldDimensions request: %s", err)
+		s.Logger.Info("Error reading FieldDimensions request", zap.Error(err))
 		EncodeTLV(conn, fieldDimensionsResponseMessage, &FieldDimensionsResponse{Err: err})
 		return
 	}
@@ -392,7 +392,7 @@ func (s *Service) processFieldDimensionsRequest(conn net.Conn) {
 		Fields:     fields,
 		Dimensions: dimensions,
 	}); err != nil {
-		s.Logger.Printf("error writing FieldDimensions response: %s", err)
+		s.Logger.Info("Error writing FieldDimensions response", zap.Error(err))
 		return
 	}
 }
@@ -425,7 +425,7 @@ func (s *Service) processSeriesKeysRequest(conn net.Conn) {
 
 		return nil
 	}(); err != nil {
-		s.Logger.Printf("error reading SeriesKeys request: %s", err)
+		s.Logger.Info("Error reading SeriesKeys request", zap.Error(err))
 		EncodeTLV(conn, seriesKeysResponseMessage, &SeriesKeysResponse{Err: err})
 		return
 	}
@@ -434,7 +434,7 @@ func (s *Service) processSeriesKeysRequest(conn net.Conn) {
 	if err := EncodeTLV(conn, seriesKeysResponseMessage, &SeriesKeysResponse{
 		SeriesList: seriesList,
 	}); err != nil {
-		s.Logger.Printf("error writing SeriesKeys response: %s", err)
+		s.Logger.Info("Error writing SeriesKeys response", zap.Error(err))
 		return
 	}
 }

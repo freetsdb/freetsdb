@@ -2,8 +2,6 @@ package main
 
 import (
 	"fmt"
-	"io/ioutil"
-	"log"
 	"os"
 	"path/filepath"
 	"sort"
@@ -11,11 +9,12 @@ import (
 	"text/tabwriter"
 
 	"github.com/freetsdb/freetsdb/tsdb"
+	"go.uber.org/zap"
 )
 
 func cmdInfo(path string) {
 	tstore := tsdb.NewStore(filepath.Join(path, "data"))
-	tstore.Logger = log.New(ioutil.Discard, "", log.LstdFlags)
+	tstore.Logger = zap.NewNop()
 	tstore.EngineOptions.Config.Dir = filepath.Join(path, "data")
 	tstore.EngineOptions.Config.WALLoggingEnabled = false
 	tstore.EngineOptions.Config.WALDir = filepath.Join(path, "wal")

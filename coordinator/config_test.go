@@ -1,11 +1,11 @@
-package cluster_test
+package coordinator_test
 
 import (
 	"testing"
 	"time"
 
 	"github.com/BurntSushi/toml"
-	"github.com/freetsdb/freetsdb/cluster"
+	"github.com/freetsdb/freetsdb/coordinator"
 )
 
 func TestConfig_Parse(t *testing.T) {

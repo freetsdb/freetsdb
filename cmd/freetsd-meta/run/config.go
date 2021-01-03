@@ -11,19 +11,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/freetsdb/freetsdb/coordinator"
-	"github.com/freetsdb/freetsdb/monitor"
-	"github.com/freetsdb/freetsdb/services/collectd"
-	"github.com/freetsdb/freetsdb/services/continuous_querier"
-	"github.com/freetsdb/freetsdb/services/graphite"
-	"github.com/freetsdb/freetsdb/services/hh"
-	"github.com/freetsdb/freetsdb/services/httpd"
-	"github.com/freetsdb/freetsdb/services/opentsdb"
-	"github.com/freetsdb/freetsdb/services/precreator"
-	"github.com/freetsdb/freetsdb/services/retention"
-	"github.com/freetsdb/freetsdb/services/subscriber"
-	"github.com/freetsdb/freetsdb/services/udp"
-	"github.com/freetsdb/freetsdb/tsdb"
+	"github.com/freetsdb/freetsdb/services/meta"
 )
 
 const (
@@ -37,24 +25,7 @@ const (
 
 // Config represents the configuration format for the freetsd binary.
 type Config struct {
-	Data        tsdb.Config        `toml:"data"`
-	Coordinator coordinator.Config `toml:"coordinator"`
-	Retention   retention.Config   `toml:"retention"`
-	Precreator  precreator.Config  `toml:"shard-precreation"`
-
-	Monitor    monitor.Config    `toml:"monitor"`
-	Subscriber subscriber.Config `toml:"subscriber"`
-	HTTPD      httpd.Config      `toml:"http"`
-	Graphites  []graphite.Config `toml:"graphite"`
-	Collectd   collectd.Config   `toml:"collectd"`
-	OpenTSDB   opentsdb.Config   `toml:"opentsdb"`
-	UDPs       []udp.Config      `toml:"udp"`
-
-	ContinuousQuery continuous_querier.Config `toml:"continuous_queries"`
-	HintedHandoff   hh.Config                 `toml:"hinted-handoff"`
-
-	// Server reporting
-	ReportingDisabled bool `toml:"reporting-disabled"`
+	Meta *meta.Config `toml:"meta"`
 
 	// BindAddress is the address that all TCP services use (Raft, Snapshot, Coordinator, etc.)
 	BindAddress string `toml:"bind-address"`
@@ -69,19 +40,8 @@ type Config struct {
 // NewConfig returns an instance of Config with reasonable defaults.
 func NewConfig() *Config {
 	c := &Config{}
-	c.Data = tsdb.NewConfig()
-	c.Coordinator = coordinator.NewConfig()
-	c.Precreator = precreator.NewConfig()
+	c.Meta = meta.NewConfig()
 
-	c.Monitor = monitor.NewConfig()
-	c.Subscriber = subscriber.NewConfig()
-	c.HTTPD = httpd.NewConfig()
-	c.Collectd = collectd.NewConfig()
-	c.OpenTSDB = opentsdb.NewConfig()
-
-	c.ContinuousQuery = continuous_querier.NewConfig()
-	c.Retention = retention.NewConfig()
-	c.HintedHandoff = hh.NewConfig()
 	c.BindAddress = DefaultBindAddress
 
 	// All ARRAY attributes have to be init after toml decode
@@ -94,20 +54,9 @@ func NewConfig() *Config {
 	return c
 }
 
-// InitTableAttrs initialises all ARRAY attributes if empty
-func (c *Config) InitTableAttrs() {
-	if len(c.UDPs) == 0 {
-		c.UDPs = []udp.Config{udp.NewConfig()}
-	}
-	if len(c.Graphites) == 0 {
-		c.Graphites = []graphite.Config{graphite.NewConfig()}
-	}
-}
-
 // NewDemoConfig returns the config that runs when no config is specified.
 func NewDemoConfig() (*Config, error) {
 	c := NewConfig()
-	c.InitTableAttrs()
 
 	var homeDir string
 	// By default, store meta and data files in current users home directory
@@ -120,33 +69,20 @@ func NewDemoConfig() (*Config, error) {
 		return nil, fmt.Errorf("failed to determine current user for storage")
 	}
 
-	c.Data.Dir = filepath.Join(homeDir, ".freetsdb/data")
-	c.HintedHandoff.Dir = filepath.Join(homeDir, ".freetsdb/hh")
-	c.Data.WALDir = filepath.Join(homeDir, ".freetsdb/wal")
-
-	c.HintedHandoff.Enabled = true
+	c.Meta.Dir = filepath.Join(homeDir, ".freetsdb/meta")
 
 	return c, nil
 }
 
 // Validate returns an error if the config is invalid.
 func (c *Config) Validate() error {
-	if !c.Data.Enabled {
-		return errors.New("Data must be enabled")
+	if !c.Meta.Enabled {
+		return errors.New("Meta, must be enabled")
 	}
 
-	if c.Data.Enabled {
-		if err := c.Data.Validate(); err != nil {
+	if c.Meta.Enabled {
+		if err := c.Meta.Validate(); err != nil {
 			return err
-		}
-
-		if err := c.HintedHandoff.Validate(); err != nil {
-			return err
-		}
-		for _, g := range c.Graphites {
-			if err := g.Validate(); err != nil {
-				return fmt.Errorf("invalid graphite config: %v", err)
-			}
 		}
 	}
 

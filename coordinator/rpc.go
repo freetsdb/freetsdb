@@ -1,4 +1,4 @@
-package cluster
+package coordinator
 
 import (
 	"errors"
@@ -6,9 +6,9 @@ import (
 	"time"
 
 	"github.com/gogo/protobuf/proto"
-	"github.com/freetsdb/freetsdb/cluster/internal"
-	"github.com/freetsdb/freetsdb/influxql"
+	"github.com/freetsdb/freetsdb/coordinator/internal"
 	"github.com/freetsdb/freetsdb/models"
+	"github.com/freetsdb/freetsdb/services/influxql"
 )
 
 //go:generate protoc --gogo_out=. internal/data.proto

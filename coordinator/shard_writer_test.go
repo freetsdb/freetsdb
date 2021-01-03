@@ -1,4 +1,4 @@
-package cluster_test
+package coordinator_test
 
 import (
 	"net"
@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/freetsdb/freetsdb/cluster"
+	"github.com/freetsdb/freetsdb/coordinator"
 	"github.com/freetsdb/freetsdb/models"
 	"github.com/freetsdb/freetsdb/toml"
 )
