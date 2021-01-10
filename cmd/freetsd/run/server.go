@@ -98,9 +98,6 @@ type Server struct {
 	CPUProfile string
 	MemProfile string
 
-	// joinPeers are the metaservers specified at run time to join this server to
-	joinPeers []string
-
 	// metaUseTLS specifies if we should use a TLS connection to the meta servers
 	metaUseTLS bool
 
@@ -164,7 +161,7 @@ func NewServer(c *Config, buildInfo *BuildInfo) (*Server, error) {
 
 		Node:       node,
 		NewNode:    newNode,
-		MetaClient: meta.NewClient(),
+		MetaClient: meta.NewClient(node),
 
 		Monitor: monitor.New(c.Monitor),
 
@@ -377,6 +374,8 @@ func (s *Server) Open() error {
 	go mux.Serve(ln)
 
 	s.NodeListener = mux.Listen(NodeMuxHeader)
+	go s.nodeService()
+
 	// initialize MetaClient.
 	if err = s.initializeMetaClient(); err != nil {
 		return err
@@ -608,14 +607,14 @@ func (s *Server) monitorErrorChan(ch <-chan error) {
 	}
 }
 
-const MetaServerInfo = 0x01
+const RequestClusterJoin = 0x01
 
 type Request struct {
 	Type  uint8
 	Peers []string
 }
 
-func (s *Server) createDataNode() error {
+func (s *Server) nodeService() error {
 
 	for {
 		// Wait for next connection.
@@ -626,7 +625,6 @@ func (s *Server) createDataNode() error {
 			log.Printf("Error accepting DATA node request", err.Error())
 			continue
 		}
-		defer conn.Close()
 
 		var r Request
 		if err := json.NewDecoder(conn).Decode(&r); err != nil {
@@ -634,45 +632,24 @@ func (s *Server) createDataNode() error {
 		}
 
 		switch r.Type {
-		case MetaServerInfo:
-
-			s.MetaClient.SetMetaServers(r.Peers)
-			s.MetaClient.SetTLS(s.metaUseTLS)
-			if err := s.MetaClient.Open(); err != nil {
-				return err
+		case RequestClusterJoin:
+			if !s.NewNode {
+				conn.Close()
+				continue
 			}
 
-			// if the node ID is > 0 then we need to initialize the metaclient
-			if s.Node.ID > 0 {
-				s.MetaClient.WaitForDataChanged()
+			if len(r.Peers) == 0 {
+				log.Printf("Invalid MetaServerInfo: empty Peers")
+				conn.Close()
+				continue
 			}
 
-			if s.config.Data.Enabled {
-				// If we've already created a data node for our id, we're done
-				if _, err := s.MetaClient.DataNode(s.Node.ID); err == nil {
-					return nil
-				}
+			s.joinCluster(conn, r.Peers)
 
-				n, err := s.MetaClient.CreateDataNode(s.HTTPAddr(), s.TCPAddr())
-				for err != nil {
-					log.Printf("Unable to create data node. retry in 1s: %s", err.Error())
-					time.Sleep(time.Second)
-					n, err = s.MetaClient.CreateDataNode(s.HTTPAddr(), s.TCPAddr())
-				}
-				s.Node.ID = n.ID
-
-				if err := s.Node.Save(); err != nil {
-					return err
-				}
-
-				if err := json.NewEncoder(conn).Encode(n); err != nil {
-					log.Printf("Error reading request", err.Error())
-				}
-			}
-			return nil
 		default:
 			log.Printf("request type unknown: %v", r.Type)
 		}
+		conn.Close()
 
 	}
 
@@ -680,15 +657,62 @@ func (s *Server) createDataNode() error {
 
 }
 
+func (s *Server) joinCluster(conn net.Conn, peers []string) {
+
+	metaClient := meta.NewClient(nil)
+	metaClient.SetMetaServers(peers)
+	if err := metaClient.Open(); err != nil {
+		log.Printf("Error open MetaClient", err.Error())
+		return
+	}
+
+	// if the node ID is > 0 then we need to initialize the metaclient
+	if s.Node.ID > 0 {
+		metaClient.WaitForDataChanged()
+	}
+
+	if s.config.Data.Enabled {
+		// If we've already created a data node for our id, we're done
+		if _, err := metaClient.DataNode(s.Node.ID); err == nil {
+			metaClient.Close()
+			return
+		}
+
+		n, err := metaClient.CreateDataNode(s.HTTPAddr(), s.TCPAddr())
+		for err != nil {
+			log.Printf("Unable to create data node. retry in 1s: %s", err.Error())
+			time.Sleep(time.Second)
+			n, err = s.MetaClient.CreateDataNode(s.HTTPAddr(), s.TCPAddr())
+		}
+		metaClient.Close()
+
+		s.Node.ID = n.ID
+		s.Node.Peers = peers
+
+		if err := s.Node.Save(); err != nil {
+			log.Printf("Error save node", err.Error())
+			return
+		}
+		s.NewNode = false
+
+		if err := json.NewEncoder(conn).Encode(n); err != nil {
+			log.Printf("Error writing response", err.Error())
+		}
+	}
+
+}
+
 // initializeMetaClient will set the MetaClient and join the node to the cluster if needed
 func (s *Server) initializeMetaClient() error {
 
-	if s.NewNode {
-		return s.createDataNode()
+	for {
+		if len(s.Node.Peers) == 0 {
+			time.Sleep(time.Second)
+			continue
+		}
+		s.MetaClient.SetMetaServers(s.Node.Peers)
+		break
 	}
-
-	// load meta info from local
-
 	s.MetaClient.SetTLS(s.metaUseTLS)
 
 	if err := s.MetaClient.Open(); err != nil {
@@ -698,25 +722,6 @@ func (s *Server) initializeMetaClient() error {
 	// if the node ID is > 0 then we need to initialize the metaclient
 	if s.Node.ID > 0 {
 		s.MetaClient.WaitForDataChanged()
-	}
-
-	if s.config.Data.Enabled {
-		// If we've already created a data node for our id, we're done
-		if _, err := s.MetaClient.DataNode(s.Node.ID); err == nil {
-			return nil
-		}
-
-		n, err := s.MetaClient.CreateDataNode(s.HTTPAddr(), s.TCPAddr())
-		for err != nil {
-			log.Printf("Unable to create data node. retry in 1s: %s", err.Error())
-			time.Sleep(time.Second)
-			n, err = s.MetaClient.CreateDataNode(s.HTTPAddr(), s.TCPAddr())
-		}
-		s.Node.ID = n.ID
-
-		if err := s.Node.Save(); err != nil {
-			return err
-		}
 	}
 
 	return nil

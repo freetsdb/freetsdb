@@ -1,12 +1,12 @@
 package retention // import "github.com/freetsdb/freetsdb/services/retention"
 
 import (
-	"log"
-	"os"
 	"sync"
 	"time"
 
+	"github.com/freetsdb/freetsdb/logger"
 	"github.com/freetsdb/freetsdb/services/meta"
+	"go.uber.org/zap"
 )
 
 // Service represents the retention policy enforcement service.
@@ -25,7 +25,7 @@ type Service struct {
 	wg            sync.WaitGroup
 	done          chan struct{}
 
-	logger *log.Logger
+	logger *zap.Logger
 }
 
 // NewService returns a configured retention policy enforcement service.
@@ -33,13 +33,15 @@ func NewService(c Config) *Service {
 	return &Service{
 		checkInterval: time.Duration(c.CheckInterval),
 		done:          make(chan struct{}),
-		logger:        log.New(os.Stderr, "[retention] ", log.LstdFlags),
+		logger:        zap.NewNop(),
 	}
 }
 
 // Open starts retention policy enforcement.
 func (s *Service) Open() error {
-	s.logger.Println("Starting retention policy enforcement service with check interval of", s.checkInterval)
+	s.logger.Info("Starting retention policy enforcement service",
+		logger.DurationLiteral("check_interval", time.Duration(s.checkInterval)))
+
 	s.wg.Add(2)
 	go s.deleteShardGroups()
 	go s.deleteShards()
@@ -48,15 +50,15 @@ func (s *Service) Open() error {
 
 // Close stops retention policy enforcement.
 func (s *Service) Close() error {
-	s.logger.Println("retention policy enforcement terminating")
+	s.logger.Info("Retention policy enforcement terminating")
 	close(s.done)
 	s.wg.Wait()
 	return nil
 }
 
-// SetLogger sets the internal logger to the logger passed in.
-func (s *Service) SetLogger(l *log.Logger) {
-	s.logger = l
+// WithLogger sets the logger on the service.
+func (s *Service) WithLogger(log *zap.Logger) {
+	s.logger = log.With(zap.String("service", "retention"))
 }
 
 func (s *Service) deleteShardGroups() {
@@ -72,7 +74,7 @@ func (s *Service) deleteShardGroups() {
 		case <-ticker.C:
 			dbs, err := s.MetaClient.Databases()
 			if err != nil {
-				s.logger.Printf("error getting databases: %s", err.Error())
+				s.logger.Info("error getting databases", zap.Error(err))
 				continue
 			}
 
@@ -80,11 +82,16 @@ func (s *Service) deleteShardGroups() {
 				for _, r := range d.RetentionPolicies {
 					for _, g := range r.ExpiredShardGroups(time.Now().UTC()) {
 						if err := s.MetaClient.DeleteShardGroup(d.Name, r.Name, g.ID); err != nil {
-							s.logger.Printf("failed to delete shard group %d from database %s, retention policy %s: %s",
-								g.ID, d.Name, r.Name, err.Error())
+							s.logger.Info("Failed to delete shard group",
+								logger.Database(d.Name),
+								logger.ShardGroup(g.ID),
+								logger.RetentionPolicy(r.Name),
+								zap.Error(err))
 						} else {
-							s.logger.Printf("deleted shard group %d from database %s, retention policy %s",
-								g.ID, d.Name, r.Name)
+							s.logger.Info("Deleted shard group",
+								logger.Database(d.Name),
+								logger.ShardGroup(g.ID),
+								logger.RetentionPolicy(r.Name))
 						}
 					}
 				}
@@ -104,7 +111,7 @@ func (s *Service) deleteShards() {
 			return
 
 		case <-ticker.C:
-			s.logger.Println("retention policy shard deletion check commencing")
+			s.logger.Info("Retention policy shard deletion check commencing")
 
 			type deletionInfo struct {
 				db string
@@ -113,7 +120,7 @@ func (s *Service) deleteShards() {
 			deletedShardIDs := make(map[uint64]deletionInfo, 0)
 			dbs, err := s.MetaClient.Databases()
 			if err != nil {
-				s.logger.Printf("error getting databases: %s", err.Error())
+				s.logger.Info("Error getting databases", zap.Error(err))
 			}
 			for _, d := range dbs {
 				for _, r := range d.RetentionPolicies {
@@ -128,12 +135,17 @@ func (s *Service) deleteShards() {
 			for _, id := range s.TSDBStore.ShardIDs() {
 				if di, ok := deletedShardIDs[id]; ok {
 					if err := s.TSDBStore.DeleteShard(id); err != nil {
-						s.logger.Printf("failed to delete shard ID %d from database %s, retention policy %s: %s",
-							id, di.db, di.rp, err.Error())
+						s.logger.Info("Failed to delete shard",
+							logger.Shard(id),
+							logger.Database(di.db),
+							logger.RetentionPolicy(di.rp),
+							zap.Error(err))
 						continue
 					}
-					s.logger.Printf("shard ID %d from database %s, retention policy %s, deleted",
-						id, di.db, di.rp)
+					s.logger.Info("Deleted shard",
+						logger.Shard(id),
+						logger.Database(di.db),
+						logger.RetentionPolicy(di.rp))
 				}
 			}
 		}

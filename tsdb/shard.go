@@ -15,9 +15,10 @@ import (
 
 	"github.com/gogo/protobuf/proto"
 	"github.com/freetsdb/freetsdb"
-	"github.com/freetsdb/freetsdb/influxql"
 	"github.com/freetsdb/freetsdb/models"
+	"github.com/freetsdb/freetsdb/services/influxql"
 	"github.com/freetsdb/freetsdb/tsdb/internal"
+	"go.uber.org/zap"
 )
 
 const (
@@ -76,6 +77,9 @@ type Shard struct {
 	database        string
 	retentionPolicy string
 
+	baseLogger *zap.Logger
+	logger     *zap.Logger
+
 	engine  Engine
 	options EngineOptions
 
@@ -94,6 +98,8 @@ func NewShard(id uint64, index *DatabaseIndex, path string, walPath string, opti
 	// Configure statistics collection.
 	key := fmt.Sprintf("shard:%s:%d", path, id)
 	db, rp := DecodeStorePath(path)
+	logger := zap.NewNop()
+
 	tags := map[string]string{
 		"path":            path,
 		"id":              fmt.Sprintf("%d", id),
@@ -114,9 +120,17 @@ func NewShard(id uint64, index *DatabaseIndex, path string, walPath string, opti
 		database:        db,
 		retentionPolicy: rp,
 
-		statMap:   statMap,
-		LogOutput: os.Stderr,
+		logger:     logger,
+		baseLogger: logger,
+
+		statMap: statMap,
 	}
+}
+
+// WithLogger sets the logger on the shard. It must be called before Open.
+func (s *Shard) WithLogger(log *zap.Logger) {
+	s.baseLogger = log
+	s.logger = s.baseLogger.With(zap.String("service", "shard"))
 }
 
 // Path returns the path set on the shard when it was created.
@@ -144,7 +158,7 @@ func (s *Shard) Open() error {
 		s.engine = e
 
 		// Set log output on the engine.
-		s.engine.SetLogOutput(s.LogOutput)
+		e.WithLogger(s.baseLogger)
 
 		// Open engine.
 		if err := s.engine.Open(); err != nil {

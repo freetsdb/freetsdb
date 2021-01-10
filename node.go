@@ -2,7 +2,6 @@ package freetsdb
 
 import (
 	"encoding/json"
-	"fmt"
 	"io/ioutil"
 	"os"
 	"path/filepath"
@@ -16,8 +15,9 @@ const (
 )
 
 type Node struct {
-	path string
-	ID   uint64
+	path  string
+	ID    uint64
+	Peers []string
 }
 
 // LoadNode will load the node information from disk if present
@@ -96,9 +96,6 @@ func upgradeNodeFile(path string) error {
 		return err
 	}
 	err = json.Unmarshal(pb, &peers)
-	if len(peers) > 1 {
-		return fmt.Errorf("to upgrade a cluster, please contact support at influxdata")
-	}
 
 	n := &Node{
 		path: path,

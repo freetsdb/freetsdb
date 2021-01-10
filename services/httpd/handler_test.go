@@ -15,9 +15,9 @@ import (
 
 	"github.com/freetsdb/freetsdb"
 	"github.com/freetsdb/freetsdb/client"
-	"github.com/freetsdb/freetsdb/influxql"
 	"github.com/freetsdb/freetsdb/models"
 	"github.com/freetsdb/freetsdb/services/httpd"
+	"github.com/freetsdb/freetsdb/services/influxql"
 	"github.com/freetsdb/freetsdb/services/meta"
 )
 
@@ -330,12 +330,12 @@ func TestHandler_Version(t *testing.T) {
 
 	for _, test := range tests {
 		h.ServeHTTP(w, MustNewRequest(test.method, test.endpoint, test.body))
-		if v, ok := w.HeaderMap["X-Influxdb-Version"]; ok {
+		if v, ok := w.HeaderMap["X-FreeTSDB-Version"]; ok {
 			if v[0] != "0.0.0" {
 				t.Fatalf("unexpected version: %s", v)
 			}
 		} else {
-			t.Fatalf("Header entry 'X-Influxdb-Version' not present")
+			t.Fatalf("Header entry 'X-FreeTSDB-Version' not present")
 		}
 	}
 }
@@ -465,7 +465,7 @@ type Handler struct {
 
 // NewHandler returns a new instance of Handler.
 func NewHandler(requireAuthentication bool) *Handler {
-	statMap := influxdb.NewStatistics("httpd", "httpd", nil)
+	statMap := freetsdb.NewStatistics("httpd", "httpd", nil)
 	h := &Handler{
 		Handler: httpd.NewHandler(requireAuthentication, true, false, false, statMap),
 	}

@@ -12,6 +12,7 @@ import (
 	"math"
 	"math/rand"
 	"net/http"
+	"reflect"
 	"sort"
 	"sync"
 	"time"
@@ -56,6 +57,7 @@ type Client struct {
 
 	mu          sync.RWMutex
 	metaServers []string
+	node        *freetsdb.Node
 	changed     chan struct{}
 	closing     chan struct{}
 	cacheData   *Data
@@ -71,11 +73,12 @@ type authUser struct {
 }
 
 // NewClient returns a new *Client.
-func NewClient() *Client {
+func NewClient(n *freetsdb.Node) *Client {
 	return &Client{
 		cacheData: &Data{},
 		logger:    zap.NewNop(),
 		authCache: make(map[string]authUser, 0),
+		node:      n,
 	}
 }
 
@@ -1130,6 +1133,7 @@ func (c *Client) pollForUpdates() {
 		idx := c.cacheData.Index
 		c.cacheData = data
 		c.updateAuthCache()
+		c.updateMetaPeers()
 		if idx < data.Index {
 			close(c.changed)
 			c.changed = make(chan struct{})
@@ -1253,6 +1257,29 @@ func (c *Client) updateAuthCache() {
 	}
 
 	c.authCache = newCache
+}
+
+func (c *Client) updateMetaPeers() {
+
+	if c.node == nil {
+		return
+	}
+
+	peers := []string{}
+	for _, metaNode := range c.cacheData.MetaNodes {
+		peers = append(peers, metaNode.Host)
+	}
+
+	if !reflect.DeepEqual(c.node.Peers, peers) {
+		c.metaServers = peers
+		oldPeers := c.node.Peers
+		c.node.Peers = peers
+		if err := c.node.Save(); err != nil {
+			c.node.Peers = oldPeers
+			c.logger.Info("Error save node: %s", zap.Error(err))
+			return
+		}
+	}
 }
 
 func (c *Client) MetaServers() []string {

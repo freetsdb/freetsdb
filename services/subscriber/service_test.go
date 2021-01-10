@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/freetsdb/freetsdb/cluster"
+	"github.com/freetsdb/freetsdb/coordinator"
 	"github.com/freetsdb/freetsdb/services/meta"
 	"github.com/freetsdb/freetsdb/services/subscriber"
 )

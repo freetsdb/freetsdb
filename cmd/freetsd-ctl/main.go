@@ -86,20 +86,10 @@ func (m *Main) Run(args ...string) error {
 		if err := cmd.Run(args...); err != nil {
 			return fmt.Errorf("restore: %s", err)
 		}
-	case "add-meta":
+	case "add-meta", "remove-meta", "add-data", "remove-data", "show":
 		cmd := node.NewCommand(name)
 		if err := cmd.Run(args...); err != nil {
-			return fmt.Errorf("add-meta: %s", err)
-		}
-	case "add-data":
-		cmd := node.NewCommand(name)
-		if err := cmd.Run(args...); err != nil {
-			return fmt.Errorf("add-data: %s", err)
-		}
-	case "show":
-		cmd := node.NewCommand(name)
-		if err := cmd.Run(args...); err != nil {
-			return fmt.Errorf("show: %s", err)
+			return fmt.Errorf("%s: %s", name, err)
 		}
 	default:
 		return fmt.Errorf(`unknown command "%s"`+"\n"+`Run 'freetsd-ctl help' for usage`+"\n\n", name)

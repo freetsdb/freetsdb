@@ -6,7 +6,7 @@ import (
 	"sort"
 	"time"
 
-	"github.com/freetsdb/freetsdb/influxql"
+	"github.com/freetsdb/freetsdb/services/influxql"
 	"github.com/freetsdb/freetsdb/tsdb"
 )
 

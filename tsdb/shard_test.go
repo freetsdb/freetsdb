@@ -11,7 +11,7 @@ import (
 	"time"
 
 	"github.com/davecgh/go-spew/spew"
-	"github.com/freetsdb/freetsdb/influxql"
+	"github.com/freetsdb/freetsdb/services/influxql"
 	"github.com/freetsdb/freetsdb/models"
 	"github.com/freetsdb/freetsdb/pkg/deep"
 	"github.com/freetsdb/freetsdb/tsdb"

@@ -4,19 +4,19 @@ import (
 	"bufio"
 	"expvar"
 	"fmt"
-	"log"
 	"math"
 	"net"
-	"os"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/freetsdb/freetsdb"
-	"github.com/freetsdb/freetsdb/cluster"
+	"github.com/freetsdb/freetsdb/coordinator"
+	"github.com/freetsdb/freetsdb/logger"
 	"github.com/freetsdb/freetsdb/monitor/diagnostics"
 	"github.com/freetsdb/freetsdb/services/meta"
 	"github.com/freetsdb/freetsdb/tsdb"
+	"go.uber.org/zap"
 )
 
 const (
@@ -57,13 +57,13 @@ type Service struct {
 	batchSize        int
 	batchPending     int
 	batchTimeout     time.Duration
-	consistencyLevel cluster.ConsistencyLevel
+	consistencyLevel coordinator.ConsistencyLevel
 	udpReadBuffer    int
 
 	batcher *tsdb.PointBatcher
 	parser  *Parser
 
-	logger           *log.Logger
+	logger           *zap.Logger
 	statMap          *expvar.Map
 	tcpConnectionsMu sync.Mutex
 	tcpConnections   map[string]*tcpConnection
@@ -81,7 +81,7 @@ type Service struct {
 		DeregisterDiagnosticsClient(name string)
 	}
 	PointsWriter interface {
-		WritePoints(p *cluster.WritePointsRequest) error
+		WritePoints(p *coordinator.WritePointsRequest) error
 	}
 	MetaClient interface {
 		CreateDatabase(name string) (*meta.DatabaseInfo, error)
@@ -101,13 +101,13 @@ func NewService(c Config) (*Service, error) {
 		batchPending:   d.BatchPending,
 		udpReadBuffer:  d.UDPReadBuffer,
 		batchTimeout:   time.Duration(d.BatchTimeout),
-		logger:         log.New(os.Stderr, "[graphite] ", log.LstdFlags),
+		logger:         zap.NewNop(),
 		tcpConnections: make(map[string]*tcpConnection),
 		done:           make(chan struct{}),
 		diagsKey:       strings.Join([]string{"graphite", d.Protocol, d.BindAddress}, ":"),
 	}
 
-	consistencyLevel, err := cluster.ParseConsistencyLevel(d.ConsistencyLevel)
+	consistencyLevel, err := coordinator.ParseConsistencyLevel(d.ConsistencyLevel)
 	if err != nil {
 		return nil, err
 	}
@@ -131,7 +131,9 @@ func (s *Service) Open() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	s.logger.Printf("Starting graphite service, batch size %d, batch timeout %s", s.batchSize, s.batchTimeout)
+	s.logger.Info("Starting graphite service",
+		zap.Int("batch_size", s.batchSize),
+		logger.DurationLiteral("batch_timeout", s.batchTimeout))
 
 	// Configure expvar monitoring. It's OK to do this even if the service fails to open and
 	// should be done before any data could arrive for the service.
@@ -144,7 +146,9 @@ func (s *Service) Open() error {
 	}
 
 	if _, err := s.MetaClient.CreateDatabase(s.database); err != nil {
-		s.logger.Printf("Failed to ensure target database %s exists: %s", s.database, err.Error())
+		s.logger.Info("Failed to ensure target database",
+			logger.Database(s.database),
+			zap.Error(err))
 		return err
 	}
 
@@ -167,7 +171,9 @@ func (s *Service) Open() error {
 		return err
 	}
 
-	s.logger.Printf("Listening on %s: %s", strings.ToUpper(s.protocol), s.addr.String())
+	s.logger.Info("Listening on",
+		zap.String("protocol", strings.ToUpper(s.protocol)),
+		zap.Stringer("addr", s.addr))
 	return nil
 }
 func (s *Service) closeAllConnections() {
@@ -207,9 +213,9 @@ func (s *Service) Close() error {
 	return nil
 }
 
-// SetLogger sets the internal logger to the logger passed in.
-func (s *Service) SetLogger(l *log.Logger) {
-	s.logger = l
+// WithLogger sets the logger on the service.
+func (s *Service) WithLogger(log *zap.Logger) {
+	s.logger = log.With(zap.String("service", "graphite"))
 }
 
 // Addr returns the address the Service binds to.
@@ -231,11 +237,11 @@ func (s *Service) openTCPServer() (net.Addr, error) {
 		for {
 			conn, err := s.ln.Accept()
 			if opErr, ok := err.(*net.OpError); ok && !opErr.Temporary() {
-				s.logger.Println("graphite TCP listener closed")
+				s.logger.Info("graphite TCP listener closed")
 				return
 			}
 			if err != nil {
-				s.logger.Println("error accepting TCP connection", err.Error())
+				s.logger.Info("Error accepting TCP connection", zap.Error(err))
 				continue
 			}
 
@@ -346,7 +352,9 @@ func (s *Service) handleLine(line string) {
 				return
 			}
 		}
-		s.logger.Printf("unable to parse line: %s: %s", line, err)
+		s.logger.Info("Unable to parse line",
+			zap.String("line", line),
+			zap.Error(err))
 		s.statMap.Add(statPointsParseFail, 1)
 		return
 	}
@@ -360,7 +368,7 @@ func (s *Service) processBatches(batcher *tsdb.PointBatcher) {
 	for {
 		select {
 		case batch := <-batcher.Out():
-			if err := s.PointsWriter.WritePoints(&cluster.WritePointsRequest{
+			if err := s.PointsWriter.WritePoints(&coordinator.WritePointsRequest{
 				Database:         s.database,
 				RetentionPolicy:  "",
 				ConsistencyLevel: s.consistencyLevel,
@@ -369,7 +377,9 @@ func (s *Service) processBatches(batcher *tsdb.PointBatcher) {
 				s.statMap.Add(statBatchesTransmitted, 1)
 				s.statMap.Add(statPointsTransmitted, int64(len(batch)))
 			} else {
-				s.logger.Printf("failed to write point batch to database %q: %s", s.database, err)
+				s.logger.Info("Failed to write point batch",
+					logger.Database(s.database),
+					zap.Error(err))
 				s.statMap.Add(statBatchesTransmitFail, 1)
 			}
 

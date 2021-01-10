@@ -9,8 +9,9 @@ import (
 	"sort"
 	"time"
 
-	"github.com/freetsdb/freetsdb/influxql"
 	"github.com/freetsdb/freetsdb/models"
+	"github.com/freetsdb/freetsdb/services/influxql"
+	"go.uber.org/zap"
 )
 
 var (
@@ -28,7 +29,7 @@ type Engine interface {
 	Open() error
 	Close() error
 
-	SetLogOutput(io.Writer)
+	WithLogger(*zap.Logger)
 	LoadMetadataIndex(shard *Shard, index *DatabaseIndex, measurementFields map[string]*MeasurementFields) error
 
 	CreateIterator(opt influxql.IteratorOptions) (influxql.Iterator, error)

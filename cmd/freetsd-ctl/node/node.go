@@ -18,10 +18,9 @@ type Command struct {
 	Stdout io.Writer
 	Stderr io.Writer
 
-	Cmd         string
-	MetaAddr    string
-	DataAddr    string
-	NewNodeAddr string
+	Cmd            string
+	MetaAddr       string
+	RemoteNodeAddr string
 
 	// TODO: when the new meta stuff is done this should not be exported or be gone
 	MetaConfig *meta.Config
@@ -44,12 +43,17 @@ func (cmd *Command) Run(args ...string) error {
 	}
 
 	if cmd.Cmd == "add-meta" {
-		return cmd.addMeta(cmd.MetaAddr, cmd.NewNodeAddr)
+		return cmd.addMeta(cmd.MetaAddr, cmd.RemoteNodeAddr)
+	} else if cmd.Cmd == "remove-meta" {
+		return cmd.removeMeta(cmd.MetaAddr, cmd.RemoteNodeAddr)
 	} else if cmd.Cmd == "add-data" {
-		return cmd.addData(cmd.MetaAddr, cmd.NewNodeAddr)
+		return cmd.addData(cmd.MetaAddr, cmd.RemoteNodeAddr)
+	} else if cmd.Cmd == "remove-data" {
+		return cmd.removeData(cmd.MetaAddr, cmd.RemoteNodeAddr)
 	} else if cmd.Cmd == "show" {
 		return cmd.nodeInfo(cmd.MetaAddr)
 	}
+
 	return nil
 }
 
@@ -57,9 +61,13 @@ func (cmd *Command) Run(args ...string) error {
 func (cmd *Command) parseFlags(args []string) error {
 
 	if cmd.Cmd == "add-meta" && len(args) > 0 {
-		cmd.NewNodeAddr = args[0]
+		cmd.RemoteNodeAddr = args[0]
+	} else if cmd.Cmd == "remove-meta" && len(args) > 0 {
+		cmd.RemoteNodeAddr = args[0]
 	} else if cmd.Cmd == "add-data" && len(args) > 0 {
-		cmd.NewNodeAddr = args[0]
+		cmd.RemoteNodeAddr = args[0]
+	} else if cmd.Cmd == "remove-data" && len(args) > 0 {
+		cmd.RemoteNodeAddr = args[0]
 	} else if cmd.Cmd == "show" {
 
 	} else if cmd.Cmd == "freetsd-ctl" && len(args) > 0 && args[0] == "-h" {
@@ -68,58 +76,112 @@ func (cmd *Command) parseFlags(args []string) error {
 		cmd.printUsage()
 	}
 
-	cmd.MetaAddr = "localhost:8091"
+	if cmd.MetaAddr == "" {
+		cmd.MetaAddr = "localhost:8091"
+	}
 
 	// validate the arguments
-	if (cmd.Cmd == "add-meta" || cmd.Cmd == "add-data") && cmd.NewNodeAddr == "" {
-		return fmt.Errorf("new node address required")
+	if (cmd.Cmd == "add-meta" ||
+		cmd.Cmd == "remove-meta" ||
+		cmd.Cmd == "add-data" ||
+		cmd.Cmd == "remove-data") &&
+		cmd.RemoteNodeAddr == "" {
+		return fmt.Errorf("Remote node address required")
 	}
 
 	return nil
 }
 
-func (cmd *Command) addMeta(metaAddr, newNodeAddr string) error {
-	//func (c *Client) JoinMetaServer(httpAddr, tcpAddr string) (*NodeInfo, error) {
-
+func (cmd *Command) getMetaServers(metaAddr string) ([]string, error) {
 	resp, err := http.Get(fmt.Sprintf("http://%s/meta-servers", metaAddr))
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer resp.Body.Close()
 
-	b, err := ioutil.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		b, err := ioutil.ReadAll(resp.Body)
+		if err != nil {
+			return nil, err
+		}
+		return nil, fmt.Errorf(string(b))
+	}
+
+	peers := []string{}
+	if err := json.NewDecoder(resp.Body).Decode(&peers); err != nil {
+		return nil, err
+	}
+
+	return peers, nil
+}
+
+func (cmd *Command) addMeta(metaAddr, newNodeAddr string) error {
+	peers, err := cmd.getMetaServers(metaAddr)
 	if err != nil {
 		return err
 	}
 
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf(string(b))
+	if len(peers) == 0 {
+		return fmt.Errorf("Failed to get MetaServerInfo: empty Peers")
 	}
 
-	resp2, err := http.Post(fmt.Sprintf("http://%s/join-cluster", newNodeAddr),
+	b, err := json.Marshal(peers)
+	if err != nil {
+		return err
+	}
+
+	resp, err := http.Post(fmt.Sprintf("http://%s/join-cluster", newNodeAddr),
 		"application/json",
 		bytes.NewBuffer(b))
 	if err != nil {
 		return err
 	}
-	defer resp2.Body.Close()
+	defer resp.Body.Close()
 
-	// Successfully joined
-	node := meta.NodeInfo{}
-	if resp2.StatusCode == http.StatusOK {
-		if err := json.NewDecoder(resp2.Body).Decode(&node); err != nil {
+	n := meta.NodeInfo{}
+	if resp.StatusCode == http.StatusOK {
+		if err := json.NewDecoder(resp.Body).Decode(&n); err != nil {
 			return err
 		}
 
 	}
 
-	fmt.Printf("Added meta node %d at %s\n", node.ID, node.Host)
+	fmt.Printf("Added meta node %d at %s\n", n.ID, n.Host)
+
+	return nil
+}
+
+func (cmd *Command) removeMeta(metaAddr, remoteNodeAddr string) error {
+
+	n := meta.NodeInfo{}
+	n.Host = remoteNodeAddr
+
+	b, err := json.Marshal(n)
+	if err != nil {
+		return err
+	}
+	resp, err := http.Post(fmt.Sprintf("http://%s/remove-meta", metaAddr),
+		"application/json",
+		bytes.NewBuffer(b))
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusOK {
+		if err := json.NewDecoder(resp.Body).Decode(&n); err != nil {
+			return err
+		}
+
+	}
+
+	fmt.Printf("Removed meta node %d at %s\n", n.ID, n.Host)
 
 	return nil
 }
 
 const NodeMuxHeader = 9
-const MetaServerInfo = 0x01
+const RequestClusterJoin = 0x01
 
 type Request struct {
 	Type  uint8
@@ -127,40 +189,29 @@ type Request struct {
 }
 
 func (cmd *Command) addData(metaAddr, newNodeAddr string) error {
-
-	resp, err := http.Get(fmt.Sprintf("http://%s/meta-servers", metaAddr))
+	peers, err := cmd.getMetaServers(metaAddr)
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
+
+	if len(peers) == 0 {
+		return fmt.Errorf("Failed to get MetaServerInfo: empty Peers")
+	}
 
 	r := Request{}
-	r.Type = MetaServerInfo
-	if err := json.NewDecoder(resp.Body).Decode(&r.Peers); err != nil {
-		return err
-	}
+	r.Type = RequestClusterJoin
+	r.Peers = peers
 
-	if resp.StatusCode != http.StatusOK {
-		b, err := ioutil.ReadAll(resp.Body)
-		if err != nil {
-			return err
-		}
-		return fmt.Errorf(string(b))
-	}
-
-	// Connect to snapshotter service.
 	conn, err := tcp.Dial("tcp", newNodeAddr, NodeMuxHeader)
 	if err != nil {
 		return err
 	}
 	defer conn.Close()
 
-	// Write the request
 	if err := json.NewEncoder(conn).Encode(r); err != nil {
 		return fmt.Errorf("Encode snapshot request: %s", err)
 	}
 
-	// Read the response
 	node := meta.NodeInfo{}
 	if err := json.NewDecoder(conn).Decode(&node); err != nil {
 		return err
@@ -171,7 +222,72 @@ func (cmd *Command) addData(metaAddr, newNodeAddr string) error {
 	return nil
 }
 
+func (cmd *Command) removeData(metaAddr, remoteNodeAddr string) error {
+	peers, err := cmd.getMetaServers(metaAddr)
+	if err != nil {
+		return err
+	}
+
+	if len(peers) == 0 {
+		return fmt.Errorf("Failed to get MetaServerInfo: empty Peers")
+	}
+
+	metaClient := meta.NewClient(nil)
+	metaClient.SetMetaServers(peers)
+	if err := metaClient.Open(); err != nil {
+		return err
+	}
+	defer metaClient.Close()
+
+	n, err := metaClient.DataNodeByTCPHost(remoteNodeAddr)
+	if err != nil {
+		return err
+	}
+
+	if err := metaClient.DeleteDataNode(n.ID); err != nil {
+		return err
+	}
+
+	fmt.Printf("Removed data node %d at %s\n", n.ID, n.TCPHost)
+	return nil
+
+}
+
 func (cmd *Command) nodeInfo(metaAddr string) error {
+	peers, err := cmd.getMetaServers(metaAddr)
+	if err != nil {
+		return err
+	}
+
+	if len(peers) == 0 {
+		return fmt.Errorf("Failed to get MetaServerInfo: empty Peers")
+	}
+
+	metaClient := meta.NewClient(nil)
+	metaClient.SetMetaServers(peers)
+	if err := metaClient.Open(); err != nil {
+		return err
+	}
+	defer metaClient.Close()
+
+	metaNodes, err := metaClient.MetaNodes()
+	if err != nil {
+		return err
+	}
+	dataNodes, err := metaClient.DataNodes()
+	if err != nil {
+		return err
+	}
+
+	fmt.Fprintln(cmd.Stdout, "Meta Nodes:")
+	for _, n := range metaNodes {
+		fmt.Fprintln(cmd.Stdout, "\t", n)
+	}
+
+	fmt.Fprintln(cmd.Stdout, "Data Nodes:")
+	for _, n := range dataNodes {
+		fmt.Fprintln(cmd.Stdout, "\t", n)
+	}
 
 	return nil
 }

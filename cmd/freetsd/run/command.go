@@ -152,7 +152,6 @@ func (cmd *Command) ParseFlags(args ...string) (Options, error) {
 	fs := flag.NewFlagSet("", flag.ContinueOnError)
 	fs.StringVar(&options.ConfigPath, "config", "", "")
 	fs.StringVar(&options.PIDFile, "pidfile", "", "")
-	fs.StringVar(&options.Join, "join", "", "")
 	fs.StringVar(&options.Hostname, "hostname", "", "")
 	fs.StringVar(&options.CPUProfile, "cpuprofile", "", "")
 	fs.StringVar(&options.MemProfile, "memprofile", "", "")
@@ -206,15 +205,10 @@ func (cmd *Command) ParseConfig(path string) (*Config, error) {
 
 var usage = `usage: run [flags]
 
-run starts the FreeTSDB server. If this is the first time running the command
-then a new cluster will be initialized unless the -join argument is used.
+run starts the FreeTSDB server.
 
         -config <path>
                           Set the path to the configuration file.
-
-        -join <host:port>
-                          Joins the server to an existing cluster. Should be
-                          the HTTP bind address of an existing meta server
 
         -hostname <name>
                           Override the hostname, the 'hostname' configuration
@@ -234,7 +228,6 @@ then a new cluster will be initialized unless the -join argument is used.
 type Options struct {
 	ConfigPath string
 	PIDFile    string
-	Join       string
 	Hostname   string
 	CPUProfile string
 	MemProfile string

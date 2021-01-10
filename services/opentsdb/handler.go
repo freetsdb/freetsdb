@@ -7,27 +7,27 @@ import (
 	"errors"
 	"expvar"
 	"io"
-	"log"
 	"net"
 	"net/http"
 	"time"
 
 	"github.com/freetsdb/freetsdb"
-	"github.com/freetsdb/freetsdb/cluster"
+	"github.com/freetsdb/freetsdb/coordinator"
 	"github.com/freetsdb/freetsdb/models"
+	"go.uber.org/zap"
 )
 
 // Handler is an http.Handler for the service.
 type Handler struct {
 	Database         string
 	RetentionPolicy  string
-	ConsistencyLevel cluster.ConsistencyLevel
+	ConsistencyLevel coordinator.ConsistencyLevel
 
 	PointsWriter interface {
-		WritePoints(p *cluster.WritePointsRequest) error
+		WritePoints(p *coordinator.WritePointsRequest) error
 	}
 
-	Logger *log.Logger
+	Logger *zap.Logger
 
 	statMap *expvar.Map
 }
@@ -115,7 +115,7 @@ func (h *Handler) servePut(w http.ResponseWriter, r *http.Request) {
 
 		pt, err := models.NewPoint(p.Metric, p.Tags, map[string]interface{}{"value": p.Value}, ts)
 		if err != nil {
-			h.Logger.Printf("Dropping point %v: %v", p.Metric, err)
+			h.Logger.Info("Dropping point", zap.String("name", p.Metric), zap.Error(err))
 			h.statMap.Add(statDroppedPointsInvalid, 1)
 			continue
 		}
@@ -123,17 +123,17 @@ func (h *Handler) servePut(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Write points.
-	if err := h.PointsWriter.WritePoints(&cluster.WritePointsRequest{
+	if err := h.PointsWriter.WritePoints(&coordinator.WritePointsRequest{
 		Database:         h.Database,
 		RetentionPolicy:  h.RetentionPolicy,
 		ConsistencyLevel: h.ConsistencyLevel,
 		Points:           points,
 	}); freetsdb.IsClientError(err) {
-		h.Logger.Println("write series error: ", err)
+		h.Logger.Info("Write series error", zap.Error(err))
 		http.Error(w, "write series error: "+err.Error(), http.StatusBadRequest)
 		return
 	} else if err != nil {
-		h.Logger.Println("write series error: ", err)
+		h.Logger.Info("Write series error", zap.Error(err))
 		http.Error(w, "write series error: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -160,7 +160,6 @@ func (ln *chanListener) Accept() (net.Conn, error) {
 	if !ok {
 		return nil, errors.New("network connection closed")
 	}
-	log.Println("TSDB listener accept ", conn)
 	return conn, nil
 }
 

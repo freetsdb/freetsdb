@@ -77,36 +77,6 @@ func newStore(c *Config, httpAddr, raftAddr string) *store {
 func (s *store) open(raftln net.Listener) error {
 	s.logger.Printf("Using data dir: %v", s.path)
 
-	joinPeers, err := s.filterAddr(s.config.JoinPeers, s.httpAddr)
-	if err != nil {
-		return err
-	}
-	joinPeers = s.config.JoinPeers
-
-	var initializePeers []string
-	if len(joinPeers) > 0 {
-		c := NewClient()
-		c.SetMetaServers(joinPeers)
-		c.SetTLS(s.config.HTTPSEnabled)
-		for {
-			peers := c.peers()
-			if !Peers(peers).Contains(s.raftAddr) {
-				peers = append(peers, s.raftAddr)
-			}
-			if len(s.config.JoinPeers)-len(peers) == 0 {
-				initializePeers = peers
-				break
-			}
-
-			if len(peers) > len(s.config.JoinPeers) {
-				s.logger.Printf("waiting for join peers to match config specified. found %v, config specified %v", peers, s.config.JoinPeers)
-			} else {
-				s.logger.Printf("Waiting for %d join peers.  Have %v. Asking nodes: %v", len(s.config.JoinPeers)-len(peers), peers, joinPeers)
-			}
-			time.Sleep(time.Second)
-		}
-	}
-
 	if err := s.setOpen(); err != nil {
 		return err
 	}
@@ -117,28 +87,8 @@ func (s *store) open(raftln net.Listener) error {
 	}
 
 	// Open the raft store.
-	if err := s.openRaft(initializePeers, raftln); err != nil {
+	if err := s.openRaft(raftln); err != nil {
 		return fmt.Errorf("raft: %s", err)
-	}
-
-	if len(joinPeers) > 0 {
-		c := NewClient()
-		c.SetMetaServers(joinPeers)
-		c.SetTLS(s.config.HTTPSEnabled)
-		if err := c.Open(); err != nil {
-			return err
-		}
-		defer c.Close()
-
-		n, err := c.JoinMetaServer(s.httpAddr, s.raftAddr)
-		if err != nil {
-			return err
-		}
-		s.node.ID = n.ID
-		if err := s.node.Save(); err != nil {
-			return err
-		}
-
 	}
 
 	// Wait for a leader to be elected so we know the raft log is loaded
@@ -193,45 +143,13 @@ func (s *store) peers() []string {
 	return peers
 }
 
-func (s *store) filterAddr(addrs []string, filter string) ([]string, error) {
-	host, port, err := net.SplitHostPort(filter)
-	if err != nil {
-		return nil, err
-	}
-
-	ip, err := net.ResolveIPAddr("ip", host)
-	if err != nil {
-		return nil, err
-	}
-
-	var joinPeers []string
-	for _, addr := range addrs {
-		joinHost, joinPort, err := net.SplitHostPort(addr)
-		if err != nil {
-			return nil, err
-		}
-
-		joinIp, err := net.ResolveIPAddr("ip", joinHost)
-		if err != nil {
-			return nil, err
-		}
-
-		// Don't allow joining ourselves
-		if ip.String() == joinIp.String() && port == joinPort {
-			continue
-		}
-		joinPeers = append(joinPeers, addr)
-	}
-	return joinPeers, nil
-}
-
-func (s *store) openRaft(initializePeers []string, raftln net.Listener) error {
+func (s *store) openRaft(raftln net.Listener) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	rs := newRaftState(s.config, s.raftAddr)
 	rs.path = s.path
 
-	if err := rs.open(s, raftln, initializePeers); err != nil {
+	if err := rs.open(s, raftln); err != nil {
 		return err
 	}
 	s.raftState = rs
@@ -369,6 +287,18 @@ func (s *store) metaServersHTTP() []string {
 	return a
 }
 
+func (s *store) metaNodeByAddr(host string) (*NodeInfo, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	for _, n := range s.data.MetaNodes {
+		if host == n.Host {
+			return &n, nil
+		}
+	}
+	return nil, fmt.Errorf("failed to find the node")
+}
+
 func (s *store) dataServers() []string {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -424,36 +354,50 @@ func (s *store) joinMeta(n *NodeInfo) (*NodeInfo, error) {
 	return nil, ErrNodeNotFound
 }
 
-func (s *store) joinData(n *NodeInfo) (*NodeInfo, error) {
+// remove a server from the metaservice and raft
+func (s *store) removeMeta(host string) (*NodeInfo, error) {
+
+	n, err := s.metaNodeByAddr(host)
+	if err != nil {
+		return nil, err
+	}
+
+	if s.leaderHTTP() == host {
+		return nil, fmt.Errorf("Can't remove leader node")
+	}
+
 	s.mu.RLock()
 	if s.raftState == nil {
 		s.mu.RUnlock()
 		return nil, fmt.Errorf("store not open")
 	}
-	if err := s.raftState.addVoter(n.TCPHost); err != nil {
+
+	if err := s.raftState.removeVoter(n.TCPHost); err != nil {
 		s.mu.RUnlock()
 		return nil, err
 	}
 	s.mu.RUnlock()
 
-	if err := s.createMetaNode(n.Host, n.TCPHost); err != nil {
+	if err := s.removeMetaNode(n.ID); err != nil {
 		return nil, err
 	}
 
 	s.mu.RLock()
-	defer s.mu.RUnlock()
 	for _, node := range s.data.MetaNodes {
 		if node.TCPHost == n.TCPHost && node.Host == n.Host {
-			return &node, nil
+			s.mu.RUnlock()
+			return nil, ErrNodeUnableToDropNode
 		}
 	}
-	return nil, ErrNodeNotFound
+	s.mu.RUnlock()
+
+	return n, nil
 }
 
 func (s *store) joinCluster(peers []string) (*NodeInfo, error) {
 
 	if len(peers) > 0 {
-		c := NewClient()
+		c := NewClient(nil)
 		c.SetMetaServers(peers)
 		c.SetTLS(s.config.HTTPSEnabled)
 
@@ -492,6 +436,24 @@ func (s *store) createMetaNode(addr, raftAddr string) error {
 	t := internal.Command_CreateMetaNodeCommand
 	cmd := &internal.Command{Type: &t}
 	if err := proto.SetExtension(cmd, internal.E_CreateMetaNodeCommand_Command, val); err != nil {
+		panic(err)
+	}
+
+	b, err := proto.Marshal(cmd)
+	if err != nil {
+		return err
+	}
+
+	return s.apply(b)
+}
+
+func (s *store) removeMetaNode(id uint64) error {
+	val := &internal.DeleteMetaNodeCommand{
+		ID: proto.Uint64(id),
+	}
+	t := internal.Command_DeleteMetaNodeCommand
+	cmd := &internal.Command{Type: &t}
+	if err := proto.SetExtension(cmd, internal.E_DeleteMetaNodeCommand_Command, val); err != nil {
 		panic(err)
 	}
 

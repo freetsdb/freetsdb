@@ -9,10 +9,8 @@ import (
 	"fmt"
 	"io"
 	"io/ioutil"
-	"log"
 	"net/http"
 	"net/http/pprof"
-	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -20,12 +18,13 @@ import (
 	"github.com/bmizerany/pat"
 	"github.com/freetsdb/freetsdb"
 	"github.com/freetsdb/freetsdb/client"
-	"github.com/freetsdb/freetsdb/cluster"
-	"github.com/freetsdb/freetsdb/influxql"
+	"github.com/freetsdb/freetsdb/coordinator"
 	"github.com/freetsdb/freetsdb/models"
 	"github.com/freetsdb/freetsdb/services/continuous_querier"
+	"github.com/freetsdb/freetsdb/services/influxql"
 	"github.com/freetsdb/freetsdb/services/meta"
 	"github.com/freetsdb/freetsdb/uuid"
+	"go.uber.org/zap"
 )
 
 const (
@@ -68,12 +67,12 @@ type Handler struct {
 	QueryExecutor   influxql.QueryExecutor
 
 	PointsWriter interface {
-		WritePoints(p *cluster.WritePointsRequest) error
+		WritePoints(p *coordinator.WritePointsRequest) error
 	}
 
 	ContinuousQuerier continuous_querier.ContinuousQuerier
 
-	Logger           *log.Logger
+	Logger           *zap.Logger
 	loggingEnabled   bool // Log every HTTP access.
 	WriteTrace       bool // Detailed logging of write path
 	JSONWriteEnabled bool // Allow JSON writes
@@ -85,7 +84,7 @@ func NewHandler(requireAuthentication, loggingEnabled, writeTrace, JSONWriteEnab
 	h := &Handler{
 		mux:                   pat.New(),
 		requireAuthentication: requireAuthentication,
-		Logger:                log.New(os.Stderr, "[http] ", log.LstdFlags),
+		Logger:                zap.NewNop(),
 		loggingEnabled:        loggingEnabled,
 		WriteTrace:            writeTrace,
 		JSONWriteEnabled:      JSONWriteEnabled,
@@ -278,7 +277,7 @@ func (h *Handler) serveQuery(w http.ResponseWriter, r *http.Request, user *meta.
 	if h.requireAuthentication {
 		if err := h.QueryAuthorizer.AuthorizeQuery(user, query, db); err != nil {
 			if err, ok := err.(meta.ErrAuthorize); ok {
-				h.Logger.Printf("unauthorized request | user: %q | query: %q | database %q\n", err.User, err.Query.String(), err.Database)
+				h.Logger.Info("unauthorized request", zap.Error(err))
 			}
 			httpError(w, "error authorizing query: "+err.Error(), pretty, http.StatusUnauthorized)
 			return
@@ -396,14 +395,14 @@ func (h *Handler) serveWrite(w http.ResponseWriter, r *http.Request, user *meta.
 	b, err := ioutil.ReadAll(body)
 	if err != nil {
 		if h.WriteTrace {
-			h.Logger.Print("write handler unable to read bytes from request body")
+			h.Logger.Info("write handler unable to read bytes from request body")
 		}
 		resultError(w, influxql.Result{Err: err}, http.StatusBadRequest)
 		return
 	}
 	h.statMap.Add(statWriteRequestBytesReceived, int64(len(b)))
 	if h.WriteTrace {
-		h.Logger.Printf("write body received by handler: %s", string(b))
+		h.Logger.Info("write body received by handler", zap.String("handler", string(b)))
 	}
 
 	if r.Header.Get("Content-Type") == "application/json" {
@@ -464,10 +463,10 @@ func (h *Handler) serveWriteJSON(w http.ResponseWriter, r *http.Request, body []
 	}
 
 	// Convert the json batch struct to a points writer struct
-	if err := h.PointsWriter.WritePoints(&cluster.WritePointsRequest{
+	if err := h.PointsWriter.WritePoints(&coordinator.WritePointsRequest{
 		Database:         bp.Database,
 		RetentionPolicy:  bp.RetentionPolicy,
-		ConsistencyLevel: cluster.ConsistencyLevelOne,
+		ConsistencyLevel: coordinator.ConsistencyLevelOne,
 		Points:           points,
 	}); err != nil {
 		h.statMap.Add(statPointsWrittenFail, int64(len(points)))
@@ -545,20 +544,20 @@ func (h *Handler) serveWriteLine(w http.ResponseWriter, r *http.Request, body []
 	}
 
 	// Determine required consistency level.
-	consistency := cluster.ConsistencyLevelOne
+	consistency := coordinator.ConsistencyLevelOne
 	switch r.Form.Get("consistency") {
 	case "all":
-		consistency = cluster.ConsistencyLevelAll
+		consistency = coordinator.ConsistencyLevelAll
 	case "any":
-		consistency = cluster.ConsistencyLevelAny
+		consistency = coordinator.ConsistencyLevelAny
 	case "one":
-		consistency = cluster.ConsistencyLevelOne
+		consistency = coordinator.ConsistencyLevelOne
 	case "quorum":
-		consistency = cluster.ConsistencyLevelQuorum
+		consistency = coordinator.ConsistencyLevelQuorum
 	}
 
 	// Write points.
-	if err := h.PointsWriter.WritePoints(&cluster.WritePointsRequest{
+	if err := h.PointsWriter.WritePoints(&coordinator.WritePointsRequest{
 		Database:         database,
 		RetentionPolicy:  r.FormValue("rp"),
 		ConsistencyLevel: consistency,
@@ -847,17 +846,17 @@ func requestID(inner http.Handler) http.Handler {
 	})
 }
 
-func logging(inner http.Handler, name string, weblog *log.Logger) http.Handler {
+func logging(inner http.Handler, name string, weblog *zap.Logger) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
 		l := &responseLogger{w: w}
 		inner.ServeHTTP(l, r)
 		logLine := buildLogLine(l, r, start)
-		weblog.Println(logLine)
+		weblog.Info(logLine)
 	})
 }
 
-func recovery(inner http.Handler, name string, weblog *log.Logger) http.Handler {
+func recovery(inner http.Handler, name string, weblog *zap.Logger) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
 		l := &responseLogger{w: w}
@@ -866,7 +865,7 @@ func recovery(inner http.Handler, name string, weblog *log.Logger) http.Handler 
 			if err := recover(); err != nil {
 				logLine := buildLogLine(l, r, start)
 				logLine = fmt.Sprintf(`%s [panic:%s]`, logLine, err)
-				weblog.Println(logLine)
+				weblog.Info(logLine)
 			}
 		}()
 

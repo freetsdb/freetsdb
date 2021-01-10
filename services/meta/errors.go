@@ -33,6 +33,8 @@ var (
 	// ErrNodeUnableToDropFinalNode is returned if the node being dropped is the last
 	// node in the cluster
 	ErrNodeUnableToDropFinalNode = errors.New("unable to drop the final node in a cluster")
+
+	ErrNodeUnableToDropNode = errors.New("unable to drop the node in a cluster")
 )
 
 var (

@@ -5,7 +5,7 @@ the server is running and also notify the administrator of any problems
 or potential problems with the system.
 
 At the moment, log level filtering is the only option to configure
-logging in InfluxDB. Adding a logging message and choosing its level
+logging in FreeTSDB. Adding a logging message and choosing its level
 should be done according to the guidelines in this document for
 operational clarity. The available log levels are:
 
@@ -14,7 +14,7 @@ operational clarity. The available log levels are:
 * Info
 * Debug
 
-InfluxDB uses structured logging. Structured logging is when you log
+FreeTSDB uses structured logging. Structured logging is when you log
 messages and attach context to those messages with more easily read data
 regarding the state of the system. A structured log message is composed
 of:

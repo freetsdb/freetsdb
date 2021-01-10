@@ -54,9 +54,6 @@ type Server struct {
 	CPUProfile string
 	MemProfile string
 
-	// joinPeers are the metaservers specified at run time to join this server to
-	joinPeers []string
-
 	// metaUseTLS specifies if we should use a TLS connection to the meta servers
 	metaUseTLS bool
 
@@ -124,7 +121,6 @@ func NewServer(c *Config, buildInfo *BuildInfo) (*Server, error) {
 
 		Node: node,
 
-		joinPeers:  c.Meta.JoinPeers,
 		metaUseTLS: c.Meta.HTTPSEnabled,
 
 		tcpAddr: bind,

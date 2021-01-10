@@ -1,0 +1,54 @@
+# Keep editor-specific, non-project specific ignore rules in global .gitignore:
+# https://help.github.com/articles/ignoring-files/#create-a-global-gitignore
+
+*~
+src/
+
+config.json
+/bin/
+
+/query/a.out*
+
+# ignore generated files.
+cmd/freetsd/version.go
+
+# executables
+
+godef
+gosym
+gocode
+inspect-raft
+
+# dependencies
+out_rpm/
+packages/
+
+# autconf
+autom4te.cache/
+config.log
+config.status
+
+# log file
+freetsdb.log
+benchmark.log
+
+# config file
+config.toml
+
+# test data files
+integration/migration_data/
+test-logs/
+
+# man outputs
+man/*.xml
+man/*.1
+man/*.1.gz
+
+# test outputs
+/test-results.xml
+
+# profile data
+/prof
+
+# vendored files
+/vendor

@@ -50,9 +50,6 @@ func NewServer(c *run.Config) *Server {
 
 // OpenServer opens a test server.
 func OpenServer(c *run.Config, joinURLs string) *Server {
-	if len(joinURLs) > 0 {
-		c.Meta.JoinPeers = strings.Split(joinURLs, ",")
-	}
 	s := NewServer(c)
 	configureLogging(s)
 	if err := s.Open(); err != nil {

@@ -8,9 +8,19 @@ import (
 	"github.com/freetsdb/freetsdb/toml"
 )
 
+// FIXME
+// Available index types.
+const (
+	InmemIndexName = "inmem"
+	TSI1IndexName  = "tsi1"
+)
+
 const (
 	// DefaultEngine is the default engine for new shards
 	DefaultEngine = "tsm1"
+
+	// DefaultIndex is the default index for new shards
+	DefaultIndex = InmemIndexName
 
 	// tsdb/engine/wal configuration options
 
@@ -42,7 +52,8 @@ const (
 type Config struct {
 	Enabled bool   `toml:"enabled"`
 	Dir     string `toml:"dir"`
-	Engine  string `toml:"engine"`
+	Engine  string `toml:"-"`
+	Index   string `toml:"index-version"`
 
 	// General WAL configuration options
 	WALDir            string `toml:"wal-dir"`
@@ -65,6 +76,7 @@ type Config struct {
 func NewConfig() Config {
 	return Config{
 		Engine:  DefaultEngine,
+		Index:   DefaultIndex,
 		Enabled: true, // data node enabled by default
 
 		WALLoggingEnabled: true,

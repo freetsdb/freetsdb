@@ -13,7 +13,6 @@ func TestConfig_Parse(t *testing.T) {
 	// Parse configuration.
 	var c run.Config
 	if _, err := toml.Decode(`
-join = "foo:123,bar:456"
 
 [meta]
 dir = "/tmp/meta"
@@ -81,8 +80,6 @@ enabled = true
 		t.Fatalf("unexpected subscriber enabled: %v", c.Subscriber.Enabled)
 	} else if c.ContinuousQuery.Enabled != true {
 		t.Fatalf("unexpected continuous query enabled: %v", c.ContinuousQuery.Enabled)
-	} else if exp, got := "foo:123,bar:456", c.Join; exp != got {
-		t.Fatalf("unexpected join value: got %v, exp %v", got, exp)
 	}
 }
 

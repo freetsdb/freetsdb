@@ -30,7 +30,6 @@ type raftState struct {
 	closing   chan struct{}
 	raft      *raft.Raft
 	transport *raft.NetworkTransport
-	peerStore *PeerStore
 	raftStore *raftboltdb.BoltStore
 	raftLayer *raftLayer
 	ln        net.Listener
@@ -50,7 +49,7 @@ func newRaftState(c *Config, addr string) *raftState {
 	}
 }
 
-func (r *raftState) open(s *store, ln net.Listener, initializePeers []string) error {
+func (r *raftState) open(s *store, ln net.Listener) error {
 	r.ln = ln
 	r.closing = make(chan struct{})
 
@@ -77,36 +76,6 @@ func (r *raftState) open(s *store, ln net.Listener, initializePeers []string) er
 
 	// Create a transport layer
 	r.transport = raft.NewNetworkTransport(r.raftLayer, 3, 10*time.Second, config.LogOutput)
-
-	// Create peer storage.
-	r.peerStore = &PeerStore{}
-
-	// This server is joining the raft cluster for the first time if initializePeers are passed in
-	if len(initializePeers) > 0 {
-		if err := r.SetPeers(initializePeers); err != nil {
-			return err
-		}
-	}
-
-	peers, err := r.Peers()
-	if err != nil {
-		return err
-	}
-
-	// If no peers are set in the config or there is one and we are it, then start as a single server.
-	if len(initializePeers) <= 1 {
-
-		// Make sure our peer address is here.  This happens with either a single node cluster
-		// or a node joining the cluster, as no one else has that information yet.
-		if !PeerContained(peers, r.addr) {
-			if err := r.SetPeers([]string{r.addr}); err != nil {
-				return err
-			}
-		}
-
-		peers = []string{r.addr}
-	}
-
 	// Create the log store and stable store.
 	store, err := raftboltdb.NewBoltStore(filepath.Join(r.path, "raft.db"))
 	if err != nil {
@@ -356,15 +325,7 @@ func (l *raftLayer) Accept() (net.Conn, error) { return l.ln.Accept() }
 // Close closes the layer.
 func (l *raftLayer) Close() error { return l.ln.Close() }
 
-// PeerStore is an in-memory implementation of raft.PeerStore
-type PeerStore struct {
-	mu    sync.RWMutex
-	peers []string
-}
-
 func (r *raftState) Peers() ([]string, error) {
-	r.peerStore.mu.RLock()
-	defer r.peerStore.mu.RUnlock()
 
 	if r.raft == nil {
 		return []string{}, nil
@@ -382,23 +343,6 @@ func (r *raftState) Peers() ([]string, error) {
 
 	return peers, nil
 
-}
-
-func (r *raftState) SetPeers(peers []string) error {
-	r.peerStore.mu.Lock()
-	defer r.peerStore.mu.Unlock()
-	r.peerStore.peers = peers
-	return nil
-}
-
-// PeerContained checks if a given peer is contained in a list.
-func PeerContained(peers []string, peer string) bool {
-	for _, p := range peers {
-		if p == peer {
-			return true
-		}
-	}
-	return false
 }
 
 // pathExists returns true if the given path exists.

@@ -3,18 +3,18 @@ package udp // import "github.com/freetsdb/freetsdb/services/udp"
 import (
 	"errors"
 	"expvar"
-	"log"
 	"net"
-	"os"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/freetsdb/freetsdb"
-	"github.com/freetsdb/freetsdb/cluster"
+	"github.com/freetsdb/freetsdb/coordinator"
+	"github.com/freetsdb/freetsdb/logger"
 	"github.com/freetsdb/freetsdb/models"
 	"github.com/freetsdb/freetsdb/services/meta"
 	"github.com/freetsdb/freetsdb/tsdb"
+	"go.uber.org/zap"
 )
 
 const (
@@ -49,14 +49,14 @@ type Service struct {
 	config     Config
 
 	PointsWriter interface {
-		WritePoints(p *cluster.WritePointsRequest) error
+		WritePoints(p *coordinator.WritePointsRequest) error
 	}
 
 	MetaClient interface {
 		CreateDatabase(name string) (*meta.DatabaseInfo, error)
 	}
 
-	Logger  *log.Logger
+	Logger  *zap.Logger
 	statMap *expvar.Map
 }
 
@@ -68,7 +68,7 @@ func NewService(c Config) *Service {
 		done:       make(chan struct{}),
 		parserChan: make(chan []byte, parserChanLen),
 		batcher:    tsdb.NewPointBatcher(d.BatchSize, d.BatchPending, time.Duration(d.BatchTimeout)),
-		Logger:     log.New(os.Stderr, "[udp] ", log.LstdFlags),
+		Logger:     zap.NewNop(),
 	}
 }
 
@@ -93,26 +93,31 @@ func (s *Service) Open() (err error) {
 
 	s.addr, err = net.ResolveUDPAddr("udp", s.config.BindAddress)
 	if err != nil {
-		s.Logger.Printf("Failed to resolve UDP address %s: %s", s.config.BindAddress, err)
+		s.Logger.Info("Failed to resolve UDP address",
+			zap.String("addr", s.config.BindAddress),
+			zap.Error(err))
 		return err
 	}
 
 	s.conn, err = net.ListenUDP("udp", s.addr)
 	if err != nil {
-		s.Logger.Printf("Failed to set up UDP listener at address %s: %s", s.addr, err)
+		s.Logger.Info("Failed to set up UDP listener",
+			zap.Stringer("addr", s.addr),
+			zap.Error(err))
 		return err
 	}
 
 	if s.config.ReadBuffer != 0 {
 		err = s.conn.SetReadBuffer(s.config.ReadBuffer)
 		if err != nil {
-			s.Logger.Printf("Failed to set UDP read buffer to %d: %s",
-				s.config.ReadBuffer, err)
+			s.Logger.Info("Failed to set UDP read buffer",
+				zap.Int("read_buffer", s.config.ReadBuffer),
+				zap.Error(err))
 			return err
 		}
 	}
 
-	s.Logger.Printf("Started listening on UDP: %s", s.config.BindAddress)
+	s.Logger.Info("Started listening on UDP", zap.String("addr", s.config.BindAddress))
 
 	s.wg.Add(3)
 	go s.serve()
@@ -128,16 +133,18 @@ func (s *Service) writer() {
 	for {
 		select {
 		case batch := <-s.batcher.Out():
-			if err := s.PointsWriter.WritePoints(&cluster.WritePointsRequest{
+			if err := s.PointsWriter.WritePoints(&coordinator.WritePointsRequest{
 				Database:         s.config.Database,
 				RetentionPolicy:  s.config.RetentionPolicy,
-				ConsistencyLevel: cluster.ConsistencyLevelOne,
+				ConsistencyLevel: coordinator.ConsistencyLevelOne,
 				Points:           batch,
 			}); err == nil {
 				s.statMap.Add(statBatchesTrasmitted, 1)
 				s.statMap.Add(statPointsTransmitted, int64(len(batch)))
 			} else {
-				s.Logger.Printf("failed to write point batch to database %q: %s", s.config.Database, err)
+				s.Logger.Info("failed to write point batch to database",
+					logger.Database(s.config.Database),
+					zap.Error(err))
 				s.statMap.Add(statBatchesTransmitFail, 1)
 			}
 
@@ -163,7 +170,7 @@ func (s *Service) serve() {
 			n, _, err := s.conn.ReadFromUDP(buf)
 			if err != nil {
 				s.statMap.Add(statReadFail, 1)
-				s.Logger.Printf("Failed to read UDP message: %s", err)
+				s.Logger.Info("Failed to read UDP message", zap.Error(err))
 				continue
 			}
 			s.statMap.Add(statBytesReceived, int64(n))
@@ -183,7 +190,7 @@ func (s *Service) parser() {
 			points, err := models.ParsePointsWithPrecision(buf, time.Now().UTC(), s.config.Precision)
 			if err != nil {
 				s.statMap.Add(statPointsParseFail, 1)
-				s.Logger.Printf("Failed to parse points: %s", err)
+				s.Logger.Info("Failed to parse points", zap.Error(err))
 				continue
 			}
 
@@ -210,14 +217,14 @@ func (s *Service) Close() error {
 	s.done = nil
 	s.conn = nil
 
-	s.Logger.Print("Service closed")
+	s.Logger.Info("Service closed")
 
 	return nil
 }
 
-// SetLogger sets the internal logger to the logger passed in.
-func (s *Service) SetLogger(l *log.Logger) {
-	s.Logger = l
+// WithLogger sets the logger on the service.
+func (s *Service) WithLogger(log *zap.Logger) {
+	s.Logger = log.With(zap.String("service", "udp"))
 }
 
 // Addr returns the listener's address

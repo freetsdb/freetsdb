@@ -60,8 +60,6 @@ type Config struct {
 	HTTPSEnabled     bool   `toml:"https-enabled"`
 	HTTPSCertificate string `toml:"https-certificate"`
 
-	// JoinPeers if specified gives other metastore servers to join this server to the cluster
-	JoinPeers            []string      `toml:"-"`
 	RetentionAutoCreate  bool          `toml:"retention-autocreate"`
 	ElectionTimeout      toml.Duration `toml:"election-timeout"`
 	HeartbeatTimeout     toml.Duration `toml:"heartbeat-timeout"`
@@ -89,7 +87,6 @@ func NewConfig() *Config {
 		RaftPromotionEnabled: DefaultRaftPromotionEnabled,
 		LeaseDuration:        toml.Duration(DefaultLeaseDuration),
 		LoggingEnabled:       DefaultLoggingEnabled,
-		JoinPeers:            []string{},
 	}
 }
 

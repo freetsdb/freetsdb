@@ -4,7 +4,7 @@ import (
 	"container/heap"
 	"math"
 
-	"github.com/freetsdb/freetsdb/influxql"
+	"github.com/freetsdb/freetsdb/services/influxql"
 )
 
 // EOF represents a "not found" key returned by a Cursor.

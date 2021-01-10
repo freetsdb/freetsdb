@@ -708,7 +708,6 @@ func TestMetaService_CreateRemoveMetaNode(t *testing.T) {
 
 	var wg sync.WaitGroup
 	wg.Add(2)
-	cfg1.JoinPeers = joinPeers[0:2]
 	s1 := newService(cfg1)
 	go func() {
 		defer wg.Done()
@@ -718,7 +717,6 @@ func TestMetaService_CreateRemoveMetaNode(t *testing.T) {
 	}()
 	defer s1.Close()
 
-	cfg2.JoinPeers = joinPeers[0:2]
 	s2 := newService(cfg2)
 	go func() {
 		defer wg.Done()
@@ -736,7 +734,6 @@ func TestMetaService_CreateRemoveMetaNode(t *testing.T) {
 	cfg3.BindAddress = raftPeers[2]
 	defer os.RemoveAll(cfg3.Dir)
 
-	cfg3.JoinPeers = joinPeers[0:3]
 	s3 := newService(cfg3)
 	if err := s3.Open(); err != nil {
 		t.Fatal(err)
@@ -774,7 +771,6 @@ func TestMetaService_CreateRemoveMetaNode(t *testing.T) {
 	cfg4 := newConfig()
 	cfg4.HTTPBindAddress = freePort()
 	cfg4.BindAddress = freePort()
-	cfg4.JoinPeers = []string{joinPeers[0], joinPeers[1], cfg4.HTTPBindAddress}
 	defer os.RemoveAll(cfg4.Dir)
 	s4 := newService(cfg4)
 	if err := s4.Open(); err != nil {
@@ -783,7 +779,6 @@ func TestMetaService_CreateRemoveMetaNode(t *testing.T) {
 	defer s4.Close()
 
 	c2 := meta.NewClient()
-	c2.SetMetaServers(cfg4.JoinPeers)
 	if err := c2.Open(); err != nil {
 		t.Fatal(err)
 	}
@@ -811,7 +806,6 @@ func TestMetaService_CommandAgainstNonLeader(t *testing.T) {
 	for i, _ := range cfgs {
 		c := newConfig()
 		c.HTTPBindAddress = joinPeers[i]
-		c.JoinPeers = joinPeers
 		cfgs[i] = c
 
 		srvs[i] = newService(c)
@@ -865,7 +859,6 @@ func TestMetaService_FailureAndRestartCluster(t *testing.T) {
 		c := newConfig()
 		c.HTTPBindAddress = joinPeers[i]
 		c.BindAddress = raftPeers[i]
-		c.JoinPeers = joinPeers
 		cfgs[i] = c
 
 		srvs[i] = newService(c)
@@ -1253,7 +1246,6 @@ func TestMetaService_Ping(t *testing.T) {
 	for i, _ := range cfgs {
 		c := newConfig()
 		c.HTTPBindAddress = joinPeers[i]
-		c.JoinPeers = joinPeers
 		cfgs[i] = c
 
 		srvs[i] = newService(c)

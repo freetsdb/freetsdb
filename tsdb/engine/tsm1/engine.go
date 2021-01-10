@@ -4,16 +4,17 @@ import (
 	"archive/tar"
 	"fmt"
 	"io"
-	"log"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
 	"time"
 
-	"github.com/freetsdb/freetsdb/influxql"
+	"github.com/freetsdb/freetsdb/logger"
 	"github.com/freetsdb/freetsdb/models"
+	"github.com/freetsdb/freetsdb/services/influxql"
 	"github.com/freetsdb/freetsdb/tsdb"
+	"go.uber.org/zap"
 )
 
 //go:generate tmpl -data=@iterator.gen.go.tmpldata iterator.gen.go.tmpl
@@ -38,7 +39,7 @@ type Engine struct {
 	wg   sync.WaitGroup
 
 	path   string
-	logger *log.Logger
+	logger *zap.Logger
 
 	// TODO(benbjohnson): Index needs to be moved entirely into engine.
 	index             *tsdb.DatabaseIndex
@@ -79,7 +80,7 @@ func NewEngine(path string, walPath string, opt tsdb.EngineOptions) tsdb.Engine 
 
 	e := &Engine{
 		path:   path,
-		logger: log.New(os.Stderr, "[tsm1] ", log.LstdFlags),
+		logger: zap.NewNop(),
 
 		WAL:   w,
 		Cache: cache,
@@ -97,6 +98,14 @@ func NewEngine(path string, walPath string, opt tsdb.EngineOptions) tsdb.Engine 
 	}
 
 	return e
+}
+
+// WithLogger sets the logger for the engine.
+func (e *Engine) WithLogger(log *zap.Logger) {
+	e.logger = log.With(zap.String("engine", "tsm1"))
+
+	e.WAL.WithLogger(e.logger)
+	e.FileStore.WithLogger(e.logger)
 }
 
 // Path returns the path the engine was opened with.
@@ -183,9 +192,6 @@ func (e *Engine) Close() error {
 	return e.WAL.Close()
 }
 
-// SetLogOutput is a no-op.
-func (e *Engine) SetLogOutput(w io.Writer) {}
-
 // LoadMetadataIndex loads the shard metadata into memory.
 func (e *Engine) LoadMetadataIndex(_ *tsdb.Shard, index *tsdb.DatabaseIndex, measurementFields map[string]*tsdb.MeasurementFields) error {
 	// Save reference to index for iterator creation.
@@ -224,7 +230,9 @@ func (e *Engine) LoadMetadataIndex(_ *tsdb.Shard, index *tsdb.DatabaseIndex, mea
 
 		fieldType, err := entry.values.InfluxQLType()
 		if err != nil {
-			log.Printf("error getting the data type of values for key %s: %s", key, err.Error())
+			e.logger.Info("Error getting the data type of values for key",
+				zap.String("key", key),
+				zap.Error(err))
 			continue
 		}
 
@@ -415,12 +423,13 @@ func (e *Engine) WriteSnapshot() error {
 	// Lock and grab the cache snapshot along with all the closed WAL
 	// filenames associated with the snapshot
 	started := time.Now()
-	e.logger.Printf("Cache snapshot, tsm1_cache_snapshot")
+	log, logEnd := logger.NewOperation(e.logger, "Cache snapshot", "tsm1_cache_snapshot")
 	defer func() {
 		elapsed := time.Since(started)
 		e.Cache.UpdateCompactTime(elapsed)
 
-		e.logger.Printf("Snapshot for path written, path: %v, duration: %v", e.path, elapsed)
+		log.Info("Snapshot for path written", zap.String("path", e.path), zap.Duration("duration", elapsed))
+		logEnd()
 	}()
 
 	closedFiles, snapshot, compactor, err := func() ([]string, *Cache, *Compactor, error) {
@@ -453,8 +462,10 @@ func (e *Engine) WriteSnapshot() error {
 	// holding the engine write lock.
 	dedup := time.Now()
 	snapshot.Deduplicate()
-	e.logger.Printf("Snapshot for path deduplicated, path:%v, duration: %v",
-		e.path, time.Since(dedup))
+
+	e.logger.Info("Snapshot for path deduplicated",
+		zap.String("path", e.path),
+		zap.Duration("duration", time.Since(dedup)))
 
 	return e.writeSnapshotAndCommit(closedFiles, snapshot, compactor)
 }
@@ -470,7 +481,7 @@ func (e *Engine) writeSnapshotAndCommit(closedFiles []string, snapshot *Cache, c
 	// write the new snapshot files
 	newFiles, err := compactor.WriteSnapshot(snapshot)
 	if err != nil {
-		e.logger.Printf("error writing snapshot from compactor: %v", err)
+		e.logger.Info("Error writing snapshot from compactor", zap.Error(err))
 		return err
 	}
 
@@ -479,7 +490,7 @@ func (e *Engine) writeSnapshotAndCommit(closedFiles []string, snapshot *Cache, c
 
 	// update the file store with these new files
 	if err := e.FileStore.Replace(nil, newFiles); err != nil {
-		e.logger.Printf("error adding new TSM files from snapshot: %v", err)
+		e.logger.Info("Error adding new TSM files from snapshot", zap.Error(err))
 		return err
 	}
 
@@ -487,7 +498,7 @@ func (e *Engine) writeSnapshotAndCommit(closedFiles []string, snapshot *Cache, c
 	e.Cache.ClearSnapshot(true)
 
 	if err := e.WAL.Remove(closedFiles); err != nil {
-		e.logger.Printf("error removing closed wal segments: %v", err)
+		e.logger.Info("Error removing closed wal segments", zap.Error(err))
 	}
 
 	return nil
@@ -504,10 +515,10 @@ func (e *Engine) compactCache() {
 		default:
 			e.Cache.UpdateAge()
 			if e.ShouldCompactCache(e.WAL.LastWriteTime()) {
-				e.logger.Printf("Compacting cache, path: %v", e.path)
+				e.logger.Info("Compacting cache", zap.String("path", e.path))
 				err := e.WriteSnapshot()
 				if err != nil {
-					e.logger.Printf("error writing snapshot: %v", err)
+					e.logger.Info("Error writing snapshot", zap.Error(err))
 				}
 			}
 		}
@@ -550,9 +561,17 @@ func (e *Engine) compactTSMLevel(fast bool, level int) {
 				go func(groupNum int, group CompactionGroup) {
 					defer wg.Done()
 					start := time.Now()
-					e.logger.Printf("beginning level %d compaction of group %d, %d TSM files", level, groupNum, len(group))
+					e.logger.Info("Beginning compaction",
+						zap.Int("level", level),
+						zap.Int("group", groupNum),
+						zap.Int("tsm_files", len(group)))
+
 					for i, f := range group {
-						e.logger.Printf("compacting level %d group (%d) %s (#%d)", level, groupNum, f, i)
+						e.logger.Info("Compacting group",
+							zap.Int("level", level),
+							zap.Int("group", groupNum),
+							zap.String("", f),
+							zap.Int("", i))
 					}
 
 					var files []string
@@ -561,30 +580,38 @@ func (e *Engine) compactTSMLevel(fast bool, level int) {
 					if fast {
 						files, err = e.Compactor.CompactFast(group)
 						if err != nil {
-							e.logger.Printf("error compacting TSM files: %v", err)
+							e.logger.Info("Error compacting TSM files", zap.Error(err))
 							time.Sleep(time.Second)
 							return
 						}
 					} else {
 						files, err = e.Compactor.CompactFull(group)
 						if err != nil {
-							e.logger.Printf("error compacting TSM files: %v", err)
+							e.logger.Info("Error compacting TSM files", zap.Error(err))
 							time.Sleep(time.Second)
 							return
 						}
 					}
 
 					if err := e.FileStore.Replace(group, files); err != nil {
-						e.logger.Printf("error replacing new TSM files: %v", err)
+						e.logger.Info("Error replacing new TSM files", zap.Error(err))
 						time.Sleep(time.Second)
 						return
 					}
 
 					for i, f := range files {
-						e.logger.Printf("compacted level %d group (%d) into %s (#%d)", level, groupNum, f, i)
+						e.logger.Info("Compacted group",
+							zap.Int("level", level),
+							zap.Int("group", groupNum),
+							zap.String("", f),
+							zap.Int("", i))
 					}
-					e.logger.Printf("compacted level %d group %d of %d files into %d files in %s",
-						level, groupNum, len(group), len(files), time.Since(start))
+					e.logger.Info("Compacted group",
+						zap.Int("level", level),
+						zap.Int("group", groupNum),
+						zap.Int("files", len(group)),
+						zap.Int("final_files", len(files)),
+						zap.Duration("duration", time.Since(start)))
 				}(i, group)
 			}
 			wg.Wait()
@@ -614,29 +641,39 @@ func (e *Engine) compactTSMFull() {
 				go func(groupNum int, group CompactionGroup) {
 					defer wg.Done()
 					start := time.Now()
-					e.logger.Printf("beginning full compaction of group %d, %d TSM files", groupNum, len(group))
+					e.logger.Info("Beginning full compaction",
+						zap.Int("group", groupNum),
+						zap.Int("tsm_files", len(group)))
 					for i, f := range group {
-						e.logger.Printf("compacting full group (%d) %s (#%d)", groupNum, f, i)
+						e.logger.Info("Compacting full group",
+							zap.Int("group", groupNum),
+							zap.String("", f),
+							zap.Int("", i))
 					}
 
 					files, err := e.Compactor.CompactFull(group)
 					if err != nil {
-						e.logger.Printf("error compacting TSM files: %v", err)
+						e.logger.Info("Error compacting TSM files", zap.Error(err))
 						time.Sleep(time.Second)
 						return
 					}
 
 					if err := e.FileStore.Replace(group, files); err != nil {
-						e.logger.Printf("error replacing new TSM files: %v", err)
+						e.logger.Info("Error replacing new TSM files", zap.Error(err))
 						time.Sleep(time.Second)
 						return
 					}
 
 					for i, f := range files {
-						e.logger.Printf("compacted full group (%d) into %s (#%d)", groupNum, f, i)
+						e.logger.Info("Compacted full group",
+							zap.Int("group", groupNum),
+							zap.String("", f),
+							zap.Int("", i))
 					}
-					e.logger.Printf("compacted full %d files into %d files in %s",
-						len(group), len(files), time.Since(start))
+					e.logger.Info("Compacted full files",
+						zap.Int("files", len(group)),
+						zap.Int("final_files", len(files)),
+						zap.Duration("duration", time.Since(start)))
 				}(i, group)
 			}
 			wg.Wait()
@@ -652,6 +689,7 @@ func (e *Engine) reloadCache() error {
 	}
 
 	loader := NewCacheLoader(files)
+	loader.WithLogger(e.logger)
 	if err := loader.Load(e.Cache); err != nil {
 		return err
 	}

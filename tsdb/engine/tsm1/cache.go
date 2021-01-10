@@ -3,7 +3,6 @@ package tsm1
 import (
 	"expvar"
 	"fmt"
-	"log"
 	"os"
 	"sort"
 	"sync"
@@ -11,6 +10,7 @@ import (
 
 	"github.com/freetsdb/freetsdb"
 	"github.com/freetsdb/freetsdb/tsdb"
+	"go.uber.org/zap"
 )
 
 var (
@@ -408,15 +408,20 @@ func (c *Cache) write(key string, values []Value) {
 type CacheLoader struct {
 	files []string
 
-	Logger *log.Logger
+	Logger *zap.Logger
 }
 
 // NewCacheLoader returns a new instance of a CacheLoader.
 func NewCacheLoader(files []string) *CacheLoader {
 	return &CacheLoader{
 		files:  files,
-		Logger: log.New(os.Stderr, "[cacheloader] ", log.LstdFlags),
+		Logger: zap.NewNop(),
 	}
+}
+
+// WithLogger sets the logger on the CacheLoader.
+func (cl *CacheLoader) WithLogger(log *zap.Logger) {
+	cl.Logger = log.With(zap.String("service", "cacheloader"))
 }
 
 // Load returns a cache loaded with the data contained within the segment files.
@@ -436,7 +441,9 @@ func (cl *CacheLoader) Load(cache *Cache) error {
 			if err != nil {
 				return err
 			}
-			cl.Logger.Printf("reading file %s, size %d", f.Name(), stat.Size())
+			cl.Logger.Info("Reading file",
+				zap.String("name", f.Name()),
+				zap.Int64("size", stat.Size()))
 
 			r := NewWALSegmentReader(f)
 			defer r.Close()
@@ -445,7 +452,9 @@ func (cl *CacheLoader) Load(cache *Cache) error {
 				entry, err := r.Read()
 				if err != nil {
 					n := r.Count()
-					cl.Logger.Printf("file %s corrupt at position %d, truncating", f.Name(), n)
+					cl.Logger.Info("File corrupt, truncating",
+						zap.String("name", f.Name()),
+						zap.Int64("position", n))
 					if err := f.Truncate(n); err != nil {
 						return err
 					}

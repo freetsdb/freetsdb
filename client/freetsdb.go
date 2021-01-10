@@ -343,7 +343,7 @@ func (c *Client) Ping() (time.Duration, string, error) {
 	}
 	defer resp.Body.Close()
 
-	version := resp.Header.Get("X-Influxdb-Version")
+	version := resp.Header.Get("X-FreeTSDB-Version")
 	return time.Since(now), version, nil
 }
 

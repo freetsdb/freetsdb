@@ -3,7 +3,6 @@ package tsm1
 import (
 	"expvar"
 	"fmt"
-	"log"
 	"os"
 	"path/filepath"
 	"sort"
@@ -14,6 +13,7 @@ import (
 
 	"github.com/freetsdb/freetsdb"
 	"github.com/freetsdb/freetsdb/tsdb"
+	"go.uber.org/zap"
 )
 
 type TSMFile interface {
@@ -97,7 +97,7 @@ type FileStore struct {
 
 	files []TSMFile
 
-	Logger       *log.Logger
+	Logger       *zap.Logger
 	traceLogging bool
 
 	statMap *expvar.Map
@@ -129,13 +129,18 @@ func NewFileStore(dir string) *FileStore {
 	return &FileStore{
 		dir:          dir,
 		lastModified: time.Now(),
-		Logger:       log.New(os.Stderr, "[filestore] ", log.LstdFlags),
+		Logger:       zap.NewNop(),
 		statMap: freetsdb.NewStatistics(
 			"tsm1_filestore:"+dir,
 			"tsm1_filestore",
 			map[string]string{"path": dir, "database": db, "retentionPolicy": rp},
 		),
 	}
+}
+
+// WithLogger sets the logger on the file store.
+func (f *FileStore) WithLogger(log *zap.Logger) {
+	f.Logger = log.With(zap.String("service", "filestore"))
 }
 
 // Returns the number of TSM files currently loaded
@@ -296,7 +301,10 @@ func (f *FileStore) Open() error {
 				MMAPFile: file,
 			})
 			if f.traceLogging {
-				f.Logger.Printf("%s (#%d) opened in %v", file.Name(), idx, time.Now().Sub(start))
+				f.Logger.Info("File opened",
+					zap.String("name", file.Name()),
+					zap.Int("index", idx),
+					zap.Duration("time", time.Now().Sub(start)))
 			}
 
 			if err != nil {

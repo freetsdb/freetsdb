@@ -6,7 +6,6 @@ import (
 	"expvar"
 	"fmt"
 	"io"
-	"log"
 	"math"
 	"os"
 	"path/filepath"
@@ -19,6 +18,7 @@ import (
 	"github.com/golang/snappy"
 	"github.com/freetsdb/freetsdb"
 	"github.com/freetsdb/freetsdb/tsdb"
+	"go.uber.org/zap"
 )
 
 const (
@@ -78,7 +78,7 @@ type WAL struct {
 
 	// WALOutput is the writer used by the logger.
 	LogOutput io.Writer
-	logger    *log.Logger
+	logger    *zap.Logger
 
 	// SegmentSize is the file size at which a segment file will be rotated
 	SegmentSize int
@@ -97,7 +97,7 @@ func NewWAL(path string) *WAL {
 		// these options should be overriden by any options in the config
 		LogOutput:   os.Stderr,
 		SegmentSize: DefaultSegmentSize,
-		logger:      log.New(os.Stderr, "[tsm1wal] ", log.LstdFlags),
+		logger:      zap.NewNop(),
 		closing:     make(chan struct{}),
 
 		statMap: freetsdb.NewStatistics(
@@ -106,6 +106,11 @@ func NewWAL(path string) *WAL {
 			map[string]string{"path": path, "database": db, "retentionPolicy": rp},
 		),
 	}
+}
+
+// WithLogger sets the WAL's logger.
+func (l *WAL) WithLogger(log *zap.Logger) {
+	l.logger = log.With(zap.String("service", "wal"))
 }
 
 // Path returns the path the log was initialized with.
@@ -121,8 +126,9 @@ func (l *WAL) Open() error {
 	defer l.mu.Unlock()
 
 	if l.LoggingEnabled {
-		l.logger.Printf("tsm1 WAL starting with %d segment size\n", l.SegmentSize)
-		l.logger.Printf("tsm1 WAL writing to %s\n", l.path)
+		l.logger.Info("Tsm1 WAL starting",
+			zap.Int("segment_size", l.SegmentSize),
+			zap.String("path", l.path))
 	}
 	if err := os.MkdirAll(l.path, 0777); err != nil {
 		return err

@@ -36,7 +36,7 @@ type handler struct {
 		snapshot() (*Data, error)
 		apply(b []byte) error
 		joinMeta(n *NodeInfo) (*NodeInfo, error)
-		joinData(n *NodeInfo) (*NodeInfo, error)
+		removeMeta(host string) (*NodeInfo, error)
 		joinCluster(peers []string) (*NodeInfo, error)
 		otherMetaServersHTTP() []string
 		peers() []string
@@ -110,8 +110,8 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			h.WrapHandler("execute", h.serveExec).ServeHTTP(w, r)
 		case "/add-meta":
 			h.WrapHandler("add-meta", h.serveAddMeta).ServeHTTP(w, r)
-		case "/add-data":
-			h.WrapHandler("add-data", h.serveAddData).ServeHTTP(w, r)
+		case "/remove-meta":
+			h.WrapHandler("remove-meta", h.serveRemoveMeta).ServeHTTP(w, r)
 		case "/join-cluster":
 			h.WrapHandler("join-cluster", h.serveJoinCluster).ServeHTTP(w, r)
 		}
@@ -259,7 +259,7 @@ func (h *handler) serveAddMeta(w http.ResponseWriter, r *http.Request) {
 
 }
 
-func (h *handler) serveAddData(w http.ResponseWriter, r *http.Request) {
+func (h *handler) serveRemoveMeta(w http.ResponseWriter, r *http.Request) {
 	if h.isClosed() {
 		h.httpError(fmt.Errorf("server closed"), w, http.StatusServiceUnavailable)
 		return
@@ -278,7 +278,7 @@ func (h *handler) serveAddData(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	node, err := h.store.joinData(n)
+	node, err := h.store.removeMeta(n.Host)
 	if err == raft.ErrNotLeader {
 		l := h.store.leaderHTTP()
 		if l == "" {
@@ -291,7 +291,7 @@ func (h *handler) serveAddData(w http.ResponseWriter, r *http.Request) {
 			scheme = "https://"
 		}
 
-		l = scheme + l + "/add-data"
+		l = scheme + l + "/remove-meta"
 		http.Redirect(w, r, l, http.StatusTemporaryRedirect)
 		return
 	}
@@ -438,6 +438,7 @@ func (h *handler) servePeers(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *handler) serveMetaServers(w http.ResponseWriter, r *http.Request) {
+
 	w.Header().Add("Content-Type", "application/json")
 	enc := json.NewEncoder(w)
 	if err := enc.Encode(h.store.metaServersHTTP()); err != nil {

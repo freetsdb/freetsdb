@@ -5,10 +5,10 @@ import (
 	"sort"
 	"time"
 
-	"github.com/gogo/protobuf/proto"
 	"github.com/freetsdb/freetsdb"
 	"github.com/freetsdb/freetsdb/services/influxql"
 	"github.com/freetsdb/freetsdb/services/meta/internal"
+	"github.com/gogo/protobuf/proto"
 )
 
 //go:generate protoc --gogo_out=. internal/meta.proto
@@ -51,6 +51,7 @@ func (data *Data) DataNode(id uint64) *NodeInfo {
 
 // CreateDataNode adds a node to the metadata.
 func (data *Data) CreateDataNode(host, tcpHost string) error {
+
 	// Ensure a node with the same host doesn't already exist.
 	for _, n := range data.DataNodes {
 		if n.TCPHost == tcpHost {

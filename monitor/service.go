@@ -3,7 +3,6 @@ package monitor // import "github.com/freetsdb/freetsdb/monitor"
 import (
 	"expvar"
 	"fmt"
-	"log"
 	"os"
 	"runtime"
 	"sort"
@@ -12,9 +11,11 @@ import (
 	"time"
 
 	"github.com/freetsdb/freetsdb"
+	"github.com/freetsdb/freetsdb/logger"
 	"github.com/freetsdb/freetsdb/models"
 	"github.com/freetsdb/freetsdb/monitor/diagnostics"
 	"github.com/freetsdb/freetsdb/services/meta"
+	"go.uber.org/zap"
 )
 
 const leaderWaitTimeout = 30 * time.Second
@@ -65,7 +66,7 @@ type Monitor struct {
 		WritePoints(database, retentionPolicy string, points models.Points) error
 	}
 
-	Logger *log.Logger
+	Logger *zap.Logger
 }
 
 // New returns a new instance of the monitor system.
@@ -77,14 +78,14 @@ func New(c Config) *Monitor {
 		storeDatabase:        c.StoreDatabase,
 		storeInterval:        time.Duration(c.StoreInterval),
 		storeRetentionPolicy: MonitorRetentionPolicy,
-		Logger:               log.New(os.Stderr, "[monitor] ", log.LstdFlags),
+		Logger:               zap.NewNop(),
 	}
 }
 
 // Open opens the monitoring system, using the given clusterID, node ID, and hostname
 // for identification purpose.
 func (m *Monitor) Open() error {
-	m.Logger.Printf("Starting monitor system")
+	m.Logger.Info("Starting monitor system")
 
 	// Self-register various stats and diagnostics.
 	m.RegisterDiagnosticsClient("build", &build{
@@ -110,15 +111,15 @@ func (m *Monitor) Open() error {
 
 // Close closes the monitor system.
 func (m *Monitor) Close() {
-	m.Logger.Println("shutting down monitor system")
+	m.Logger.Info("Shutting down monitor system")
 	close(m.done)
 	m.wg.Wait()
 	m.done = nil
 }
 
-// SetLogger sets the internal logger to the logger passed in.
-func (m *Monitor) SetLogger(l *log.Logger) {
-	m.Logger = l
+// WithLogger sets the logger for the Monitor.
+func (m *Monitor) WithLogger(log *zap.Logger) {
+	m.Logger = log.With(zap.String("service", "monitor"))
 }
 
 // RegisterDiagnosticsClient registers a diagnostics client with the given name and tags.
@@ -126,7 +127,7 @@ func (m *Monitor) RegisterDiagnosticsClient(name string, client diagnostics.Clie
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.diagRegistrations[name] = client
-	m.Logger.Printf(`'%s' registered for diagnostics monitoring`, name)
+	m.Logger.Info("Registered for diagnostics monitoring", zap.String("name", name))
 }
 
 // DeregisterDiagnosticsClient deregisters a diagnostics client by name.
@@ -273,8 +274,9 @@ func (m *Monitor) createInternalStorage() {
 	}
 
 	if _, err := m.MetaClient.CreateDatabase(m.storeDatabase); err != nil {
-		m.Logger.Printf("failed to create database '%s', failed to create storage: %s",
-			m.storeDatabase, err.Error())
+		m.Logger.Info("Failed to create database",
+			logger.Database(m.storeDatabase),
+			zap.Error(err))
 		return
 	}
 
@@ -282,20 +284,24 @@ func (m *Monitor) createInternalStorage() {
 	rpi.Duration = MonitorRetentionPolicyDuration
 	rpi.ReplicaN = 1
 	if _, err := m.MetaClient.CreateRetentionPolicy(m.storeDatabase, rpi); err != nil {
-		m.Logger.Printf("failed to create retention policy '%s', failed to create internal storage: %s",
-			rpi.Name, err.Error())
+		m.Logger.Info("Failed to create retention policy",
+			logger.RetentionPolicy(rpi.Name),
+			zap.Error(err))
 		return
 	}
 
 	if err := m.MetaClient.SetDefaultRetentionPolicy(m.storeDatabase, rpi.Name); err != nil {
-		m.Logger.Printf("failed to set default retention policy on '%s', failed to create internal storage: %s",
-			m.storeDatabase, err.Error())
+		m.Logger.Info("Failed to set default retention policy",
+			logger.Database(m.storeDatabase),
+			zap.Error(err))
 		return
 	}
 
 	err := m.MetaClient.DropRetentionPolicy(m.storeDatabase, "default")
 	if err != nil && err.Error() != freetsdb.ErrRetentionPolicyNotFound("default").Error() {
-		m.Logger.Printf("failed to delete retention policy 'default', failed to created internal storage: %s", err.Error())
+		m.Logger.Info("Failed to delete retention policy 'default'",
+			logger.Database(m.storeDatabase),
+			zap.Error(err))
 		return
 	}
 
@@ -306,8 +312,10 @@ func (m *Monitor) createInternalStorage() {
 // storeStatistics writes the statistics to an FreeTSDB system.
 func (m *Monitor) storeStatistics() {
 	defer m.wg.Done()
-	m.Logger.Printf("Storing statistics in database '%s' retention policy '%s', at interval %s",
-		m.storeDatabase, m.storeRetentionPolicy, m.storeInterval)
+	m.Logger.Info("Storing statistics",
+		logger.Database(m.storeDatabase),
+		logger.RetentionPolicy(m.storeRetentionPolicy),
+		logger.DurationLiteral("interval", m.storeInterval))
 
 	// Get cluster-level metadata. Nothing different is going to happen if errors occur.
 	clusterID := m.MetaClient.ClusterID()
@@ -327,7 +335,8 @@ func (m *Monitor) storeStatistics() {
 
 			stats, err := m.Statistics(clusterTags)
 			if err != nil {
-				m.Logger.Printf("failed to retrieve registered statistics: %s", err)
+				m.Logger.Info("Failed to retrieve registered statistics",
+					zap.Error(err))
 				continue
 			}
 
@@ -335,17 +344,19 @@ func (m *Monitor) storeStatistics() {
 			for _, s := range stats {
 				pt, err := models.NewPoint(s.Name, s.Tags, s.Values, time.Now().Truncate(time.Second))
 				if err != nil {
-					m.Logger.Printf("Dropping point %v: %v", s.Name, err)
+					m.Logger.Info("Dropping point",
+						zap.String("name", s.Name),
+						zap.Error(err))
 					continue
 				}
 				points = append(points, pt)
 			}
 
 			if err := m.PointsWriter.WritePoints(m.storeDatabase, m.storeRetentionPolicy, points); err != nil {
-				m.Logger.Printf("failed to store statistics: %s", err)
+				m.Logger.Info("Failed to store statistics", zap.Error(err))
 			}
 		case <-m.done:
-			m.Logger.Printf("terminating storage of statistics")
+			m.Logger.Info("terminating storage of statistics")
 			return
 		}
 

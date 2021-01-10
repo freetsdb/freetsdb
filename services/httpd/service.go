@@ -4,14 +4,13 @@ import (
 	"crypto/tls"
 	"expvar"
 	"fmt"
-	"log"
 	"net"
 	"net/http"
-	"os"
 	"strings"
 	"time"
 
 	"github.com/freetsdb/freetsdb"
+	"go.uber.org/zap"
 )
 
 // statistics gathered by the httpd package.
@@ -43,7 +42,7 @@ type Service struct {
 
 	Handler *Handler
 
-	Logger  *log.Logger
+	Logger  *zap.Logger
 	statMap *expvar.Map
 }
 
@@ -67,7 +66,7 @@ func NewService(c Config) *Service {
 			c.JSONWriteEnabled,
 			statMap,
 		),
-		Logger: log.New(os.Stderr, "[httpd] ", log.LstdFlags),
+		Logger: zap.NewNop(),
 	}
 	s.Handler.Logger = s.Logger
 	return s
@@ -75,8 +74,7 @@ func NewService(c Config) *Service {
 
 // Open starts the service
 func (s *Service) Open() error {
-	s.Logger.Println("Starting HTTP service")
-	s.Logger.Println("Authentication enabled:", s.Handler.requireAuthentication)
+	s.Logger.Info("Starting HTTP service", zap.Bool("authentication", s.Handler.requireAuthentication))
 
 	// Open listener.
 	if s.https {
@@ -92,7 +90,6 @@ func (s *Service) Open() error {
 			return err
 		}
 
-		s.Logger.Println("Listening on HTTPS:", listener.Addr().String())
 		s.ln = listener
 	} else {
 		listener, err := net.Listen("tcp", s.addr)
@@ -100,9 +97,11 @@ func (s *Service) Open() error {
 			return err
 		}
 
-		s.Logger.Println("Listening on HTTP:", listener.Addr().String())
 		s.ln = listener
 	}
+	s.Logger.Info("Listening on HTTP",
+		zap.Stringer("addr", s.ln.Addr()),
+		zap.Bool("https", s.https))
 
 	// wait for the listeners to start
 	timeout := time.Now().Add(time.Second)
@@ -130,9 +129,9 @@ func (s *Service) Close() error {
 	return nil
 }
 
-// SetLogger sets the internal logger to the logger passed in.
-func (s *Service) SetLogger(l *log.Logger) {
-	s.Logger = l
+// WithLogger sets the logger on the service.
+func (s *Service) WithLogger(log *zap.Logger) {
+	s.Logger = log.With(zap.String("service", "httpd"))
 }
 
 // Err returns a channel for fatal errors that occur on the listener.

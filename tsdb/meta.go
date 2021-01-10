@@ -10,7 +10,7 @@ import (
 	"time"
 
 	"github.com/freetsdb/freetsdb"
-	"github.com/freetsdb/freetsdb/influxql"
+	"github.com/freetsdb/freetsdb/services/influxql"
 	"github.com/freetsdb/freetsdb/pkg/escape"
 	"github.com/freetsdb/freetsdb/tsdb/internal"
 

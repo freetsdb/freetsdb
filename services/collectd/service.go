@@ -3,19 +3,19 @@ package collectd // import "github.com/freetsdb/freetsdb/services/collectd"
 import (
 	"expvar"
 	"fmt"
-	"log"
 	"net"
-	"os"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/freetsdb/freetsdb"
-	"github.com/freetsdb/freetsdb/cluster"
+	"github.com/freetsdb/freetsdb/coordinator"
+	"github.com/freetsdb/freetsdb/logger"
 	"github.com/freetsdb/freetsdb/models"
 	"github.com/freetsdb/freetsdb/services/meta"
 	"github.com/freetsdb/freetsdb/tsdb"
 	"github.com/kimor79/gollectd"
+	"go.uber.org/zap"
 )
 
 const leaderWaitTimeout = 30 * time.Second
@@ -34,7 +34,7 @@ const (
 
 // pointsWriter is an internal interface to make testing easier.
 type pointsWriter interface {
-	WritePoints(p *cluster.WritePointsRequest) error
+	WritePoints(p *coordinator.WritePointsRequest) error
 }
 
 // metaStore is an internal interface to make testing easier.
@@ -48,7 +48,7 @@ type Service struct {
 	Config       *Config
 	MetaClient   metaClient
 	PointsWriter pointsWriter
-	Logger       *log.Logger
+	Logger       *zap.Logger
 
 	wg      sync.WaitGroup
 	err     chan error
@@ -66,7 +66,7 @@ type Service struct {
 func NewService(c Config) *Service {
 	s := &Service{
 		Config: &c,
-		Logger: log.New(os.Stderr, "[collectd] ", log.LstdFlags),
+		Logger: zap.NewNop(),
 		err:    make(chan error),
 	}
 
@@ -75,7 +75,7 @@ func NewService(c Config) *Service {
 
 // Open starts the service.
 func (s *Service) Open() error {
-	s.Logger.Printf("Starting collectd service")
+	s.Logger.Info("Starting collectd service")
 
 	// Configure expvar monitoring. It's OK to do this even if the service fails to open and
 	// should be done before any data could arrive for the service.
@@ -92,7 +92,7 @@ func (s *Service) Open() error {
 	}
 
 	if _, err := s.MetaClient.CreateDatabase(s.Config.Database); err != nil {
-		s.Logger.Printf("Failed to ensure target database %s exists: %s", s.Config.Database, err.Error())
+		s.Logger.Info("Failed to ensure target database", logger.Database(s.Config.Database), zap.Error(err))
 		return err
 	}
 
@@ -127,7 +127,7 @@ func (s *Service) Open() error {
 	}
 	s.conn = conn
 
-	s.Logger.Println("Listening on UDP: ", conn.LocalAddr().String())
+	s.Logger.Info("Listening on UDP", zap.Stringer("addr", conn.LocalAddr()))
 
 	// Start the points batcher.
 	s.batcher = tsdb.NewPointBatcher(s.Config.BatchSize, s.Config.BatchPending, time.Duration(s.Config.BatchDuration))
@@ -162,13 +162,13 @@ func (s *Service) Close() error {
 	s.stop = nil
 	s.conn = nil
 	s.batcher = nil
-	s.Logger.Println("collectd UDP closed")
+	s.Logger.Info("collectd UDP closed")
 	return nil
 }
 
-// SetLogger sets the internal logger to the logger passed in.
-func (s *Service) SetLogger(l *log.Logger) {
-	s.Logger = l
+// WithLogger sets the logger on the service.
+func (s *Service) WithLogger(log *zap.Logger) {
+	s.Logger = log.With(zap.String("service", "collectd"))
 }
 
 // SetTypes sets collectd types db.
@@ -210,7 +210,7 @@ func (s *Service) serve() {
 		n, _, err := s.conn.ReadFromUDP(buffer)
 		if err != nil {
 			s.statMap.Add(statReadFail, 1)
-			s.Logger.Printf("collectd ReadFromUDP error: %s", err)
+			s.Logger.Info("collectd ReadFromUDP error", zap.Error(err))
 			continue
 		}
 		if n > 0 {
@@ -224,7 +224,7 @@ func (s *Service) handleMessage(buffer []byte) {
 	packets, err := gollectd.Packets(buffer, s.typesdb)
 	if err != nil {
 		s.statMap.Add(statPointsParseFail, 1)
-		s.Logger.Printf("Collectd parse error: %s", err)
+		s.Logger.Info("Collectd parse error", zap.Error(err))
 		return
 	}
 	for _, packet := range *packets {
@@ -244,16 +244,18 @@ func (s *Service) writePoints() {
 		case <-s.stop:
 			return
 		case batch := <-s.batcher.Out():
-			if err := s.PointsWriter.WritePoints(&cluster.WritePointsRequest{
+			if err := s.PointsWriter.WritePoints(&coordinator.WritePointsRequest{
 				Database:         s.Config.Database,
 				RetentionPolicy:  s.Config.RetentionPolicy,
-				ConsistencyLevel: cluster.ConsistencyLevelAny,
+				ConsistencyLevel: coordinator.ConsistencyLevelAny,
 				Points:           batch,
 			}); err == nil {
 				s.statMap.Add(statBatchesTrasmitted, 1)
 				s.statMap.Add(statPointsTransmitted, int64(len(batch)))
 			} else {
-				s.Logger.Printf("failed to write point batch to database %q: %s", s.Config.Database, err)
+				s.Logger.Info("Failed to write point batch",
+					logger.Database(s.Config.Database),
+					zap.Error(err))
 				s.statMap.Add(statBatchesTransmitFail, 1)
 			}
 		}
@@ -299,7 +301,7 @@ func (s *Service) UnmarshalCollectd(packet *gollectd.Packet) []models.Point {
 		p, err := models.NewPoint(name, tags, fields, timestamp)
 		// Drop invalid points
 		if err != nil {
-			s.Logger.Printf("Dropping point %v: %v", name, err)
+			s.Logger.Info("Dropping point", zap.String("name", name), zap.Error(err))
 			s.statMap.Add(statDroppedPointsInvalid, 1)
 			continue
 		}

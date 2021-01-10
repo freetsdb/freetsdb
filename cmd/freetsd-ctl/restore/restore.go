@@ -183,7 +183,6 @@ func (cmd *Command) unpackMeta() error {
 
 	// Copy meta config and remove peers so it starts in single mode.
 	c := cmd.MetaConfig
-	c.JoinPeers = nil
 	c.LoggingEnabled = false
 
 	// Create the meta dir
@@ -213,7 +212,7 @@ func (cmd *Command) unpackMeta() error {
 	default:
 	}
 
-	client := meta.NewClient()
+	client := meta.NewClient(nil)
 	client.SetMetaServers([]string{store.HTTPAddr()})
 	client.SetTLS(false)
 

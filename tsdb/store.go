@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"io"
 	"io/ioutil"
-	"log"
 	"os"
 	"path/filepath"
 	"sort"
@@ -14,8 +13,10 @@ import (
 	"sync"
 	"time"
 
-	"github.com/freetsdb/freetsdb/influxql"
+	"github.com/freetsdb/freetsdb/logger"
 	"github.com/freetsdb/freetsdb/models"
+	"github.com/freetsdb/freetsdb/services/influxql"
+	"go.uber.org/zap"
 )
 
 var (
@@ -40,7 +41,8 @@ type Store struct {
 	shards map[uint64]*Shard
 
 	EngineOptions EngineOptions
-	Logger        *log.Logger
+	Logger        *zap.Logger
+	baseLogger    *zap.Logger
 
 	closing chan struct{}
 	wg      sync.WaitGroup
@@ -53,10 +55,21 @@ func NewStore(path string) *Store {
 	opts := NewEngineOptions()
 	opts.Config = NewConfig()
 
+	logger := zap.NewNop()
 	return &Store{
 		path:          path,
 		EngineOptions: opts,
-		Logger:        log.New(os.Stderr, "[store] ", log.LstdFlags),
+		Logger:        logger,
+		baseLogger:    logger,
+	}
+}
+
+// WithLogger sets the logger for the store.
+func (s *Store) WithLogger(log *zap.Logger) {
+	s.baseLogger = log
+	s.Logger = log.With(zap.String("service", "store"))
+	for _, sh := range s.shards {
+		sh.WithLogger(s.baseLogger)
 	}
 }
 
@@ -74,7 +87,7 @@ func (s *Store) Open() error {
 	s.shards = map[uint64]*Shard{}
 	s.databaseIndexes = map[string]*DatabaseIndex{}
 
-	s.Logger.Printf("Using data dir: %v", s.Path())
+	s.Logger.Info("Using data dir", zap.String("path", s.Path()))
 
 	// Create directory.
 	if err := os.MkdirAll(s.path, 0777); err != nil {
@@ -102,7 +115,8 @@ func (s *Store) loadIndexes() error {
 	}
 	for _, db := range dbs {
 		if !db.IsDir() {
-			s.Logger.Printf("Skipping database dir: %s. Not a directory", db.Name())
+			s.Logger.Info("Skipping database dir, Not a directory",
+				logger.Database(db.Name()))
 			continue
 		}
 		s.databaseIndexes[db.Name()] = NewDatabaseIndex(db.Name())
@@ -121,7 +135,8 @@ func (s *Store) loadShards() error {
 		for _, rp := range rps {
 			// retention policies should be directories.  Skip anything that is not a dir.
 			if !rp.IsDir() {
-				s.Logger.Printf("Skipping retention policy dir: %s. Not a directory", rp.Name())
+				s.Logger.Info("Skipping retention policy dir, Not a directory",
+					logger.RetentionPolicy(rp.Name()))
 				continue
 			}
 
@@ -136,11 +151,13 @@ func (s *Store) loadShards() error {
 				// Shard file names are numeric shardIDs
 				shardID, err := strconv.ParseUint(sh.Name(), 10, 64)
 				if err != nil {
-					s.Logger.Printf("%s is not a valid ID. Skipping shard.", sh.Name())
+					s.Logger.Info("Invalid ID, Skipping shard", zap.String("name", sh.Name()))
 					continue
 				}
 
 				shard := NewShard(shardID, s.databaseIndexes[db], path, walPath, s.EngineOptions)
+				shard.WithLogger(s.baseLogger)
+
 				err = shard.Open()
 				if err != nil {
 					return err
@@ -253,6 +270,8 @@ func (s *Store) CreateShard(database, retentionPolicy string, shardID uint64) er
 
 	path := filepath.Join(s.path, database, retentionPolicy, strconv.FormatUint(shardID, 10))
 	shard := NewShard(shardID, db, path, walPath, s.EngineOptions)
+	shard.WithLogger(s.baseLogger)
+
 	if err := shard.Open(); err != nil {
 		return err
 	}

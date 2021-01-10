@@ -3,15 +3,15 @@ package subscriber // import "github.com/freetsdb/freetsdb/services/subscriber"
 import (
 	"expvar"
 	"fmt"
-	"log"
 	"net/url"
-	"os"
 	"strings"
 	"sync"
 
 	"github.com/freetsdb/freetsdb"
-	"github.com/freetsdb/freetsdb/cluster"
+	"github.com/freetsdb/freetsdb/coordinator"
+	"github.com/freetsdb/freetsdb/logger"
 	"github.com/freetsdb/freetsdb/services/meta"
+	"go.uber.org/zap"
 )
 
 // Statistics for the Subscriber service.
@@ -23,7 +23,7 @@ const (
 // PointsWriter is an interface for writing points to a subscription destination.
 // Only WritePoints() needs to be satisfied.
 type PointsWriter interface {
-	WritePoints(p *cluster.WritePointsRequest) error
+	WritePoints(p *coordinator.WritePointsRequest) error
 }
 
 // unique set that identifies a given subscription
@@ -43,9 +43,9 @@ type Service struct {
 		WaitForDataChanged() chan struct{}
 	}
 	NewPointsWriter func(u url.URL) (PointsWriter, error)
-	Logger          *log.Logger
+	Logger          *zap.Logger
 	statMap         *expvar.Map
-	points          chan *cluster.WritePointsRequest
+	points          chan *coordinator.WritePointsRequest
 	wg              sync.WaitGroup
 	closed          bool
 	closing         chan struct{}
@@ -57,9 +57,9 @@ func NewService(c Config) *Service {
 	return &Service{
 		subs:            make(map[subEntry]PointsWriter),
 		NewPointsWriter: newPointsWriter,
-		Logger:          log.New(os.Stderr, "[subscriber] ", log.LstdFlags),
+		Logger:          zap.NewNop(),
 		statMap:         freetsdb.NewStatistics("subscriber", "subscriber", nil),
-		points:          make(chan *cluster.WritePointsRequest),
+		points:          make(chan *coordinator.WritePointsRequest),
 		closed:          true,
 		closing:         make(chan struct{}),
 	}
@@ -86,7 +86,7 @@ func (s *Service) Open() error {
 	// Do not wait for this goroutine since it block until a meta change occurs.
 	go s.waitForMetaUpdates()
 
-	s.Logger.Println("opened service")
+	s.Logger.Info("Opened service")
 	return nil
 }
 
@@ -104,13 +104,13 @@ func (s *Service) Close() error {
 	}
 
 	s.wg.Wait()
-	s.Logger.Println("closed service")
+	s.Logger.Info("Closed service")
 	return nil
 }
 
-// SetLogger sets the internal logger to the logger passed in.
-func (s *Service) SetLogger(l *log.Logger) {
-	s.Logger = l
+// WithLogger sets the logger on the service.
+func (s *Service) WithLogger(log *zap.Logger) {
+	s.Logger = log.With(zap.String("service", "subscriber"))
 }
 
 func (s *Service) waitForMetaUpdates() {
@@ -122,7 +122,7 @@ func (s *Service) waitForMetaUpdates() {
 			s.mu.Lock()
 			if s.closed {
 				s.mu.Unlock()
-				s.Logger.Println("service closed not updating")
+				s.Logger.Info("service closed not updating")
 				return
 			}
 			s.mu.Unlock()
@@ -167,7 +167,9 @@ func (s *Service) Update() error {
 	for se := range s.subs {
 		if !allEntries[se] {
 			delete(s.subs, se)
-			s.Logger.Println("deleted old subscription for", se.db, se.rp)
+			s.Logger.Info("Deleted old subscription",
+				logger.Database(se.db),
+				logger.RetentionPolicy(se.rp))
 		}
 	}
 
@@ -206,7 +208,9 @@ func (s *Service) createSubscription(se subEntry, mode string, destinations []st
 		key := strings.Join([]string{"subscriber", se.db, se.rp, se.name, dest}, ":")
 		statMaps[i] = freetsdb.NewStatistics(key, "subscriber", tags)
 	}
-	s.Logger.Println("created new subscription for", se.db, se.rp)
+	s.Logger.Info("Created new subscription",
+		logger.Database(se.db),
+		logger.RetentionPolicy(se.rp))
 	return &balancewriter{
 		bm:       bm,
 		writers:  writers,
@@ -215,7 +219,7 @@ func (s *Service) createSubscription(se subEntry, mode string, destinations []st
 }
 
 // Points returns a channel into which write point requests can be sent.
-func (s *Service) Points() chan<- *cluster.WritePointsRequest {
+func (s *Service) Points() chan<- *coordinator.WritePointsRequest {
 	return s.points
 }
 
@@ -227,7 +231,7 @@ func (s *Service) writePoints() {
 			if p.Database == se.db && p.RetentionPolicy == se.rp {
 				err := sub.WritePoints(p)
 				if err != nil {
-					s.Logger.Println(err)
+					s.Logger.Info(err.Error())
 					s.statMap.Add(statWriteFailures, 1)
 				}
 			}
@@ -254,7 +258,7 @@ type balancewriter struct {
 	i        int
 }
 
-func (b *balancewriter) WritePoints(p *cluster.WritePointsRequest) error {
+func (b *balancewriter) WritePoints(p *coordinator.WritePointsRequest) error {
 	var lastErr error
 	for range b.writers {
 		// round robin through destinations.

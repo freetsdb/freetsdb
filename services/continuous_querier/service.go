@@ -4,15 +4,14 @@ import (
 	"errors"
 	"expvar"
 	"fmt"
-	"log"
-	"os"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/freetsdb/freetsdb"
-	"github.com/freetsdb/freetsdb/influxql"
+	"github.com/freetsdb/freetsdb/services/influxql"
 	"github.com/freetsdb/freetsdb/services/meta"
+	"go.uber.org/zap"
 )
 
 const (
@@ -73,7 +72,7 @@ type Service struct {
 	RunInterval   time.Duration
 	// RunCh can be used by clients to signal service to run CQs.
 	RunCh          chan *RunRequest
-	Logger         *log.Logger
+	Logger         *zap.Logger
 	loggingEnabled bool
 	statMap        *expvar.Map
 	// lastRuns maps CQ name to last time it was run.
@@ -91,7 +90,7 @@ func NewService(c Config) *Service {
 		RunCh:          make(chan *RunRequest),
 		loggingEnabled: c.LogEnabled,
 		statMap:        freetsdb.NewStatistics("cq", "cq", nil),
-		Logger:         log.New(os.Stderr, "[continuous_querier] ", log.LstdFlags),
+		Logger:         zap.NewNop(),
 		lastRuns:       map[string]time.Time{},
 	}
 
@@ -100,7 +99,7 @@ func NewService(c Config) *Service {
 
 // Open starts the service.
 func (s *Service) Open() error {
-	s.Logger.Println("Starting continuous query service")
+	s.Logger.Info("Starting continuous query service")
 
 	if s.stop != nil {
 		return nil
@@ -128,9 +127,9 @@ func (s *Service) Close() error {
 	return nil
 }
 
-// SetLogger sets the internal logger to the logger passed in.
-func (s *Service) SetLogger(l *log.Logger) {
-	s.Logger = l
+// WithLogger sets the logger on the service.
+func (s *Service) WithLogger(log *zap.Logger) {
+	s.Logger = log.With(zap.String("service", "continuous_querier"))
 }
 
 // Run runs the specified continuous query, or all CQs if none is specified.
@@ -184,14 +183,14 @@ func (s *Service) backgroundLoop() {
 	for {
 		select {
 		case <-s.stop:
-			s.Logger.Println("continuous query service terminating")
+			s.Logger.Info("continuous query service terminating")
 			return
 		case req := <-s.RunCh:
 			if !s.hasContinuousQueries() {
 				continue
 			}
 			if _, err := s.MetaClient.AcquireLease(leaseName); err == nil {
-				s.Logger.Printf("running continuous queries by request for time: %v", req.Now)
+				s.Logger.Info("Running continuous queries by request", zap.Time("at", req.Now))
 				s.runContinuousQueries(req)
 			}
 		case <-time.After(s.RunInterval):
@@ -210,7 +209,7 @@ func (s *Service) hasContinuousQueries() bool {
 	// Get list of all databases.
 	dbs, err := s.MetaClient.Databases()
 	if err != nil {
-		s.Logger.Println("error getting databases")
+		s.Logger.Info("error getting databases")
 		return false
 	}
 	// Loop through all databases executing CQs.
@@ -227,7 +226,7 @@ func (s *Service) runContinuousQueries(req *RunRequest) {
 	// Get list of all databases.
 	dbs, err := s.MetaClient.Databases()
 	if err != nil {
-		s.Logger.Println("error getting databases")
+		s.Logger.Info("error getting databases")
 		return
 	}
 	// Loop through all databases executing CQs.
@@ -238,7 +237,7 @@ func (s *Service) runContinuousQueries(req *RunRequest) {
 				continue
 			}
 			if err := s.ExecuteContinuousQuery(&db, &cq, req.Now); err != nil {
-				s.Logger.Printf("error executing query: %s: err = %s", cq.Query, err)
+				s.Logger.Info("Error executing query", zap.String("query", cq.Query), zap.Error(err))
 				s.statMap.Add(statQueryFail, 1)
 			} else {
 				s.statMap.Add(statQueryOK, 1)
@@ -320,16 +319,19 @@ func (s *Service) ExecuteContinuousQuery(dbi *meta.DatabaseInfo, cqi *meta.Conti
 	for ; !startTime.Before(oldestTime); startTime = startTime.Add(-interval) {
 		endTime := startTime.Add(interval)
 		if err := cq.q.SetTimeRange(startTime, endTime); err != nil {
-			s.Logger.Printf("error setting time range: %s\n", err)
+			s.Logger.Info("Error setting time range", zap.Error(err))
 		}
 
 		if s.loggingEnabled {
-			s.Logger.Printf("executing continuous query %s (%v to %v)", cq.Info.Name, startTime, endTime)
+			s.Logger.Info("Executing continuous query",
+				zap.String("name", cq.Info.Name),
+				zap.Time("start", startTime),
+				zap.Time("end", endTime))
 		}
 
 		// Do the actual processing of the query & writing of results.
 		if err := s.runContinuousQueryAndWriteResult(cq); err != nil {
-			s.Logger.Printf("error: %s. running: %s\n", err, cq.q.String())
+			s.Logger.Info("Error running continuous query", zap.String("running", cq.q.String()), zap.Error(err))
 			return err
 		}
 	}
