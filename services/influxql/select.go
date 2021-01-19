@@ -206,7 +206,7 @@ func buildExprIterator(expr Expr, ic IteratorCreator, opt IteratorOptions) (Iter
 	case *VarRef:
 		return ic.CreateIterator(opt)
 	case *Call:
-		// FIXME(benbjohnson): Validate that only calls with 1 arg are passed to IC.
+		// Validate that only calls with 1 arg are passed to IC.
 
 		switch expr.Name {
 		case "distinct":

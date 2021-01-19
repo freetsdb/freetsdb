@@ -8,7 +8,6 @@ import (
 	"github.com/freetsdb/freetsdb/toml"
 )
 
-// FIXME
 // Available index types.
 const (
 	InmemIndexName = "inmem"

@@ -570,8 +570,8 @@ func (e *Engine) compactTSMLevel(fast bool, level int) {
 						e.logger.Info("Compacting group",
 							zap.Int("level", level),
 							zap.Int("group", groupNum),
-							zap.String("", f),
-							zap.Int("", i))
+							zap.String("", f), // name
+							zap.Int("", i))    // index
 					}
 
 					var files []string

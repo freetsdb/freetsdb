@@ -172,7 +172,6 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	h.statMap.Add(statRequestsActive, 1)
 	start := time.Now()
 
-	// FIXME(benbjohnson): Add pprof enabled flag.
 	if strings.HasPrefix(r.URL.Path, "/debug/pprof") {
 		switch r.URL.Path {
 		case "/debug/pprof/cmdline":

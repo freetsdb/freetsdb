@@ -638,7 +638,7 @@ func (e *QueryExecutor) executeShowDiagnosticsStatement(stmt *influxql.ShowDiagn
 }
 
 func (e *QueryExecutor) executeShowFieldKeysStatement(stmt *influxql.ShowFieldKeysStatement, database string) (models.Rows, error) {
-	// FIXME(benbjohnson): Rewrite to use new query engine.
+	// Rewrite to use new query engine.
 	return e.TSDBStore.ExecuteShowFieldKeysStatement(stmt, database)
 }
 

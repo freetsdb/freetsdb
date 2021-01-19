@@ -342,7 +342,6 @@ func (r *raftState) Peers() ([]string, error) {
 	}
 
 	return peers, nil
-
 }
 
 // pathExists returns true if the given path exists.

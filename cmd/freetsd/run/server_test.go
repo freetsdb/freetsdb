@@ -1122,7 +1122,7 @@ func TestServer_Query_Tags(t *testing.T) {
 			name:    "tag without field should return error",
 			command: `SELECT host FROM db0.rp0.cpu`,
 			exp:     `{"results":[{"error":"statement must have at least one field in select clause"}]}`,
-			skip:    true, // FIXME(benbjohnson): tags should stream as values
+			skip:    true, // tags should stream as values
 		},
 		&Query{
 			name:    "field with tag should succeed",
@@ -2351,14 +2351,14 @@ func TestServer_Query_Aggregates_IntMany(t *testing.T) {
 			params:  url.Values{"db": []string{"db0"}},
 			command: `SELECT DISTINCT(host) FROM intmany`,
 			exp:     `{"results":[{"error":"statement must have at least one field in select clause"}]}`,
-			skip:    true, // FIXME(benbjohnson): should be allowed, need to stream tag values
+			skip:    true, // should be allowed, need to stream tag values
 		},
 		&Query{
 			name:    "distinct alt select tag - int",
 			params:  url.Values{"db": []string{"db0"}},
 			command: `SELECT DISTINCT host FROM intmany`,
 			exp:     `{"results":[{"error":"statement must have at least one field in select clause"}]}`,
-			skip:    true, // FIXME(benbjohnson): should be allowed, need to stream tag values
+			skip:    true, // should be allowed, need to stream tag values
 		},
 		&Query{
 			name:    "count distinct - int",
@@ -2377,14 +2377,14 @@ func TestServer_Query_Aggregates_IntMany(t *testing.T) {
 			params:  url.Values{"db": []string{"db0"}},
 			command: `SELECT COUNT(DISTINCT host) FROM intmany`,
 			exp:     `{"results":[{"series":[{"name":"intmany","columns":["time","count"],"values":[["1970-01-01T00:00:00Z",0]]}]}]}`,
-			skip:    true, // FIXME(benbjohnson): stream tag values
+			skip:    true, // stream tag values
 		},
 		&Query{
 			name:    "count distinct as call select tag - int",
 			params:  url.Values{"db": []string{"db0"}},
 			command: `SELECT COUNT(DISTINCT host) FROM intmany`,
 			exp:     `{"results":[{"series":[{"name":"intmany","columns":["time","count"],"values":[["1970-01-01T00:00:00Z",0]]}]}]}`,
-			skip:    true, // FIXME(benbjohnson): stream tag values
+			skip:    true, // stream tag values
 		},
 	}...)
 
@@ -2725,14 +2725,14 @@ func TestServer_Query_Aggregates_FloatMany(t *testing.T) {
 			params:  url.Values{"db": []string{"db0"}},
 			command: `SELECT DISTINCT(host) FROM floatmany`,
 			exp:     `{"results":[{"error":"statement must have at least one field in select clause"}]}`,
-			skip:    true, // FIXME(benbjohnson): show be allowed, stream tag values
+			skip:    true, // show be allowed, stream tag values
 		},
 		&Query{
 			name:    "distinct alt select tag - float",
 			params:  url.Values{"db": []string{"db0"}},
 			command: `SELECT DISTINCT host FROM floatmany`,
 			exp:     `{"results":[{"error":"statement must have at least one field in select clause"}]}`,
-			skip:    true, // FIXME(benbjohnson): show be allowed, stream tag values
+			skip:    true, // show be allowed, stream tag values
 		},
 		&Query{
 			name:    "count distinct - float",
@@ -2751,14 +2751,14 @@ func TestServer_Query_Aggregates_FloatMany(t *testing.T) {
 			params:  url.Values{"db": []string{"db0"}},
 			command: `SELECT COUNT(DISTINCT host) FROM floatmany`,
 			exp:     `{"results":[{"series":[{"name":"floatmany","columns":["time","count"],"values":[["1970-01-01T00:00:00Z",0]]}]}]}`,
-			skip:    true, // FIXME(benbjohnson): stream tag values
+			skip:    true, // stream tag values
 		},
 		&Query{
 			name:    "count distinct as call select tag - float",
 			params:  url.Values{"db": []string{"db0"}},
 			command: `SELECT COUNT(DISTINCT host) FROM floatmany`,
 			exp:     `{"results":[{"series":[{"name":"floatmany","columns":["time","count"],"values":[["1970-01-01T00:00:00Z",0]]}]}]}`,
-			skip:    true, // FIXME(benbjohnson): stream tag values
+			skip:    true, //  stream tag values
 		},
 	}...)
 
@@ -2959,42 +2959,42 @@ func TestServer_Query_Aggregates_String(t *testing.T) {
 			params:  url.Values{"db": []string{"db0"}},
 			command: `SELECT STDDEV(value) FROM stringdata`,
 			exp:     `{"results":[{"series":[{"name":"stringdata","columns":["time","stddev"],"values":[["1970-01-01T00:00:00Z",null]]}]}]}`,
-			skip:    true, // FIXME(benbjohnson): allow non-float var ref expr in cursor iterator
+			skip:    true, // allow non-float var ref expr in cursor iterator
 		},
 		&Query{
 			name:    "MEAN on string data - string",
 			params:  url.Values{"db": []string{"db0"}},
 			command: `SELECT MEAN(value) FROM stringdata`,
 			exp:     `{"results":[{"series":[{"name":"stringdata","columns":["time","mean"],"values":[["1970-01-01T00:00:00Z",0]]}]}]}`,
-			skip:    true, // FIXME(benbjohnson): allow non-float var ref expr in cursor iterator
+			skip:    true, // allow non-float var ref expr in cursor iterator
 		},
 		&Query{
 			name:    "MEDIAN on string data - string",
 			params:  url.Values{"db": []string{"db0"}},
 			command: `SELECT MEDIAN(value) FROM stringdata`,
 			exp:     `{"results":[{"series":[{"name":"stringdata","columns":["time","median"],"values":[["1970-01-01T00:00:00Z",null]]}]}]}`,
-			skip:    true, // FIXME(benbjohnson): allow non-float var ref expr in cursor iterator
+			skip:    true, // allow non-float var ref expr in cursor iterator
 		},
 		&Query{
 			name:    "COUNT on string data - string",
 			params:  url.Values{"db": []string{"db0"}},
 			command: `SELECT COUNT(value) FROM stringdata`,
 			exp:     `{"results":[{"series":[{"name":"stringdata","columns":["time","count"],"values":[["1970-01-01T00:00:00Z",2]]}]}]}`,
-			skip:    true, // FIXME(benbjohnson): allow non-float var ref expr in cursor iterator
+			skip:    true, // allow non-float var ref expr in cursor iterator
 		},
 		&Query{
 			name:    "FIRST on string data - string",
 			params:  url.Values{"db": []string{"db0"}},
 			command: `SELECT FIRST(value) FROM stringdata`,
 			exp:     `{"results":[{"series":[{"name":"stringdata","columns":["time","first"],"values":[["2000-01-01T00:00:03Z","first"]]}]}]}`,
-			skip:    true, // FIXME(benbjohnson): allow non-float var ref expr in cursor iterator
+			skip:    true, // allow non-float var ref expr in cursor iterator
 		},
 		&Query{
 			name:    "LAST on string data - string",
 			params:  url.Values{"db": []string{"db0"}},
 			command: `SELECT LAST(value) FROM stringdata`,
 			exp:     `{"results":[{"series":[{"name":"stringdata","columns":["time","last"],"values":[["2000-01-01T00:00:04Z","last"]]}]}]}`,
-			skip:    true, // FIXME(benbjohnson): allow non-float var ref expr in cursor iterator
+			skip:    true, // allow non-float var ref expr in cursor iterator
 		},
 	}...)
 

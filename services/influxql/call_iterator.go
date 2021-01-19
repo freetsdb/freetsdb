@@ -58,7 +58,7 @@ func NewCallIterator(input Iterator, opt IteratorOptions) (Iterator, error) {
 
 // newCountIterator returns an iterator for operating on a count() call.
 func newCountIterator(input Iterator, opt IteratorOptions) (Iterator, error) {
-	// FIXME: Wrap iterator in int-type iterator and always output int value.
+	// Wrap iterator in int-type iterator and always output int value.
 
 	switch input := input.(type) {
 	case FloatIterator:

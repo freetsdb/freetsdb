@@ -416,7 +416,6 @@ func (s *Server) Open() error {
 		s.SnapshotterService.Listener = mux.Listen(snapshotter.MuxHeader)
 		s.CopierService.Listener = mux.Listen(copier.MuxHeader)
 
-		// Configure logging for all services and clients.
 		s.MetaClient.WithLogger(s.Logger)
 
 		s.TSDBStore.WithLogger(s.Logger)

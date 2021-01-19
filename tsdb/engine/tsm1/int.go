@@ -166,7 +166,10 @@ type integerDecoder struct {
 }
 
 func NewIntegerDecoder(b []byte) IntegerDecoder {
-	d := &integerDecoder{}
+	d := &integerDecoder{
+		// 240 is the maximum number of values that can be encoded into a single uint64 using simple8b
+		//values: make([]uint64, 240),
+	}
 
 	d.SetBytes(b)
 	return d
