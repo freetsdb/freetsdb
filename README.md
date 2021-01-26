@@ -93,18 +93,8 @@ The binaries will be located in `$GOPATH/bin`. Please note that the FreeTSDB bin
 
 #### Meta node setup description and requirements
 
-The Installation process sets up three meta nodes, with each meta node running on its own server.
-You must have a minimum of three meta nodes in a cluster. FreeTSDB clusters require at least three meta nodes and an odd number of meta nodes for high availability and redundancy. We don't recommend having more than three meta nodes unless your servers or the communication between the servers have chronic reliability issues.
-
-> Note: Deploying multiple meta nodes on the same server is strongly discouraged since it creates a larger point of potential failure if that particular server is unresponsive. We recommend deploying meta nodes on relatively small footprint servers.
-
-##### Other requirements
-
-###### Ports
-
-Meta nodes communicate over ports 8088, 8089, and 8091.
-
-
+The Installation process sets up **three** meta nodes, with each meta node running on its own server.
+**You must have a minimum of three meta nodes in a cluster**. FreeTSDB clusters require at least three meta nodes and an odd number of meta nodes for high availability and redundancy. We don't recommend having more than three meta nodes unless your servers or the communication between the servers have chronic reliability issues.
 
 #### Meta node setup
 
@@ -125,14 +115,16 @@ Add your servers’ hostnames and IP addresses to each cluster server’s /etc/h
 > Before proceeding with the installation, verify on each server that the other servers are resolvable. Here is an example set of shell commands using ping:
 >
 > ping -qc 1 cluster-meta-node-01
+>
 > ping -qc 1 cluster-meta-node-02
+>
 > ping -qc 1 cluster-meta-node-03
 
 We highly recommend that each server be able to resolve the IP from the hostname alone as shown here. Resolve any connectivity issues before proceeding with the installation. A healthy cluster requires that every meta node can communicate with every other meta node.
 
 ##### Step 2: Set up, configure, and start the meta services
 
-Perform the following steps on each meta server.
+Perform the following steps on each meta server**.
 
 ###### I. Download and install the meta service
 
@@ -140,7 +132,7 @@ Perform the following steps on each meta server.
 
 ```
 wget https://github.com/freetsdb/freetsdb/releases/download/v0.0.2-beta.1/freetsdb-v0.0.2-beta.1_linux_amd64.tar.gz
-unzip freetsdb-v0.0.2-beta.1_linux_amd64.tar.gz
+tar -zxvf freetsdb-v0.0.2-beta.1_linux_amd64.tar.gz
 ```
 
 ###### II. Edit the configuration file
@@ -166,7 +158,7 @@ hostname="<cluster-meta-node-0x>"
 On Linux shell console, enter:
 
 ```
-./freetsd-meta -config ./freetsdb-meta.conf
+sudo ./freetsd-meta -config ./freetsdb-meta.conf
 ```
 
 ###### Step 3: Join the meta nodes to the cluster
@@ -248,9 +240,13 @@ Add your servers’ hostnames and IP addresses to each cluster server’s /etc/h
 > Before proceeding with the installation, verify on each meta and data server that the other servers are resolvable. Here is an example set of shell commands using ping:
 >
 > ping -qc 1 cluster-meta-node-01
+>
 > ping -qc 1 cluster-meta-node-02
+>
 > ping -qc 1 cluster-meta-node-03
+>
 > ping -qc 1 cluster-data-node-01
+>
 > ping -qc 1 cluster-data-node-02
 
 We highly recommend that each server be able to resolve the IP from the hostname alone as shown here. Resolve any connectivity issues before proceeding with the installation. A healthy cluster requires that every meta and data node can communicate with every other meta and data node.
@@ -265,7 +261,7 @@ Perform the following steps on each data node.
 
 ```
 wget https://github.com/freetsdb/freetsdb/releases/download/v0.0.2-beta.1/freetsdb-v0.0.2-beta.1_linux_amd64.tar.gz
-unzip freetsdb-v0.0.2-beta.1_linux_amd64.tar.gz
+tar -zxvf freetsdb-v0.0.2-beta.1_linux_amd64.tar.gz
 ```
 
 ###### II. Edit the data node configuration files
@@ -292,7 +288,7 @@ hostname="<cluster-data-node-0x>"
 On Linux shell console, enter:
 
 ```
-./freetsd -config ./freetsdb.conf
+sudo ./freetsd -config ./freetsdb.conf
 ```
 
 #### Join the data nodes to the cluster
