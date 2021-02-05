@@ -19,6 +19,19 @@ It's useful for recording metrics, events, and performing analytics.
   indexed as it comes in and is immediately available in queries that
   should return in < 100ms.
 
+## Architectural overview
+An FreeTSDB system consists of two separate software processes: data nodes, and meta nodes. Communication within a cluster looks like this:
+
+![](https://github.com/freetsdb/freetsdb/blob/master/images/FreeTSDB-Arch.jpg)
+
+The meta nodes communicate with each other via a TCP protocol and the Raft consensus protocol that all use port 8089 by default. The meta nodes also expose an HTTP API bound to port 8091 by default that the influxd-ctl command uses.
+
+Data nodes communicate with each other through a TCP protocol that is bound to port 8088. Data nodes communicate with the meta nodes through their HTTP API bound to 8091. 
+
+Within a cluster, all meta nodes must communicate with all other meta nodes. All data nodes must communicate with all other data nodes and all meta nodes.
+
+
+
 ## Build
 
 ### Installing Go
@@ -43,6 +56,8 @@ running the following:
 FreeTSDB uses [dep](https://github.com/golang/dep) to manage dependencies.  Install it by running the following:
 
     go get github.com/golang/dep
+    cd $GOPATH/src/github.com/golang/dep
+    ./install.sh
 
 ### Revision Control Systems
 
@@ -193,19 +208,14 @@ Added meta node x at cluster-meta-node-0x:8091
 > The expected output is:
 >
 > ```
-> Data Nodes
-> 
-> ID      TCP Address      Version
-> 
-> Meta nodes
-> 
-> TCP Address               Version
-> cluster-meta-node-01:8091   0.0.2-Beta.1
-> cluster-meta-node-02:8091   0.0.2-Beta.1
-> cluster-meta-node-03:8091   0.0.2-Beta.1
-> ```
+> Data Nodes:
 >
-> 
+> Meta Nodes:
+> 1      cluster-meta-node-01:8091
+> 2      cluster-meta-node-02:8091
+> 3      cluster-meta-node-03:8091
+>
+> ```
 
 
 
@@ -323,18 +333,14 @@ Run the add-data command once and only once for each data node you are joining t
 > The expected output is:
 >
 > ```
-> Data Nodes
-> 
-> ID   TCP Address               Version
-> 4    cluster-data-node-01:8088   0.0.2-Beta.1
-> 5    cluster-data-node-02:8088   0.0.2-Beta.1
-> 
-> Meta Nodes
-> 
-> TCP Address               Version
-> cluster-meta-node-01:8091   0.0.2-Beta.1
-> cluster-meta-node-02:8091   0.0.2-Beta.1
-> cluster-meta-node-03:8091   0.0.2-Beta.1
+> Data Nodes:
+> 4      cluster-data-node-01:8088
+> 5      cluster-data-node-02:8088
+>
+> Meta Nodes:
+> 1      cluster-meta-node-01:8091
+> 2      cluster-meta-node-02:8091
+> 3      cluster-meta-node-03:8091
 > ```
 
 

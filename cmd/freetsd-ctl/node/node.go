@@ -279,15 +279,17 @@ func (cmd *Command) nodeInfo(metaAddr string) error {
 		return err
 	}
 
-	fmt.Fprintln(cmd.Stdout, "Meta Nodes:")
-	for _, n := range metaNodes {
-		fmt.Fprintln(cmd.Stdout, "\t", n)
-	}
-
 	fmt.Fprintln(cmd.Stdout, "Data Nodes:")
 	for _, n := range dataNodes {
-		fmt.Fprintln(cmd.Stdout, "\t", n)
+		fmt.Fprintln(cmd.Stdout, n.ID, "    ", n.TCPHost)
 	}
+	fmt.Fprintln(cmd.Stdout, "")
+
+	fmt.Fprintln(cmd.Stdout, "Meta Nodes:")
+	for _, n := range metaNodes {
+		fmt.Fprintln(cmd.Stdout, n.ID, "    ", n.Host)
+	}
+	fmt.Fprintln(cmd.Stdout, "")
 
 	return nil
 }
