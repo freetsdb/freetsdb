@@ -1,126 +1,76 @@
-# Gopkg.toml example
-#
-# Refer to https://golang.github.io/dep/docs/Gopkg.toml.html
-# for detailed Gopkg.toml documentation.
-#
-# required = ["github.com/user/thing/cmd/thing"]
-# ignored = ["github.com/user/project/pkgX", "bitbucket.org/user/project/pkgA/pkgY"]
-#
-# [[constraint]]
-#   name = "github.com/user/project"
-#   version = "1.0.0"
-#
-# [[constraint]]
-#   name = "github.com/user/project2"
-#   branch = "dev"
-#   source = "github.com/myfork/project2"
-#
-# [[override]]
-#   name = "github.com/x/y"
-#   version = "2.4.0"
-#
-# [prune]
-#   non-go = false
-#   go-tests = true
-#   unused-packages = true
-
-
 [[constraint]]
   name = "collectd.org"
   version = "0.3.0"
 
 [[constraint]]
   name = "github.com/BurntSushi/toml"
-  version = "0.3.1"
-
-[[constraint]]
   branch = "master"
-  name = "github.com/bmizerany/pat"
 
 [[constraint]]
-  name = "github.com/cespare/xxhash"
-  version = "2.1.1"
-
-[[constraint]]
-  name = "github.com/davecgh/go-spew"
-  version = "1.1.1"
-
-[[constraint]]
-  branch = "master"
-  name = "github.com/dgryski/go-bits"
-
-[[constraint]]
-  branch = "master"
-  name = "github.com/dgryski/go-bitstream"
-
-[[constraint]]
-  name = "github.com/gogo/protobuf"
+  name = "github.com/boltdb/bolt"
   version = "1.3.1"
 
 [[constraint]]
-  name = "github.com/golang/snappy"
-  version = "0.0.2"
+  name = "github.com/cespare/xxhash"
+  version = "1.0.0"
 
 [[constraint]]
-  name = "github.com/google/go-cmp"
-  version = "0.5.2"
+  name = "github.com/dgrijalva/jwt-go"
+  version = "3.2.0"
+
+[[constraint]]
+  name = "github.com/gogo/protobuf"
+  version = "1.0.0"
+
+[[constraint]]
+  name = "github.com/golang/snappy"
+  revision = "d9eb7a3d35ec988b8585d4a0068e462c27d28380"
+
+[[constraint]]
+  name = "github.com/mattn/go-isatty"
+  branch = "master"
+
+[[constraint]]
+  name = "github.com/opentracing/opentracing-go"
+  branch = "master"
+
+[[constraint]]
+  name = "github.com/paulbellamy/ratecounter"
+  version = "0.2.0"
+
+[[constraint]]
+  name = "github.com/retailnext/hllpp"
+  branch = "master"
+
+[[constraint]]
+  name = "github.com/tinylib/msgp"
+  version = "1.0.2"
+
+[[constraint]]
+  name = "go.uber.org/zap"
+  version = "1.7.1"
+
+[[constraint]]
+  name = "github.com/jsternberg/zap-logfmt"
+  version = "1.0.0"
+
+[[constraint]]
+  name = "github.com/prometheus/client_golang"
+  revision = "661e31bf844dfca9aeba15f27ea8aa0d485ad212"
+
+[[constraint]]
+  name = "github.com/klauspost/pgzip"
+  version = "1.1.0"
+
+[prune]
+  go-tests = true
+  unused-packages = true
 
 [[constraint]]
   name = "github.com/hashicorp/raft"
   version = "1.1.1"
 
 [[constraint]]
-  branch = "master"
   name = "github.com/hashicorp/raft-boltdb"
+  revision = "d1e82c1ec3f15ee991f7cc7ffd5b67ff6f5bbaee"
 
-[[constraint]]
-  name = "github.com/jsternberg/zap-logfmt"
-  version = "1.2.0"
-
-[[constraint]]
-  branch = "master"
-  name = "github.com/jwilder/encoding"
-
-[[constraint]]
-  name = "github.com/kimor79/gollectd"
-  version = "1.0.0"
-
-[[constraint]]
-  name = "github.com/mattn/go-isatty"
-  version = "0.0.12"
-
-[[constraint]]
-  name = "github.com/peterh/liner"
-  version = "1.2.0"
-
-[[constraint]]
-  name = "github.com/stretchr/testify"
-  version = "1.6.1"
-
-[[constraint]]
-  name = "github.com/xlab/treeprint"
-  version = "1.0.0"
-
-[[constraint]]
-  name = "go.uber.org/zap"
-  version = "1.16.0"
-
-[[constraint]]
-  branch = "master"
-  name = "golang.org/x/crypto"
-
-[[constraint]]
-  branch = "master"
-  name = "golang.org/x/sys"
-
-[[constraint]]
-  branch = "master"
-  name = "golang.org/x/time"
-
-[[constraint]]
-  name = "gopkg.in/fatih/pool.v2"
-  version = "2.0.0"
-
-[prune]
-  go-tests = true
-  unused-packages = true

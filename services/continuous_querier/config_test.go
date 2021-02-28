@@ -21,7 +21,26 @@ enabled = true
 	// Validate configuration.
 	if time.Duration(c.RunInterval) != time.Minute {
 		t.Fatalf("unexpected run interval: %v", c.RunInterval)
-	} else if c.Enabled != true {
+	} else if !c.Enabled {
 		t.Fatalf("unexpected enabled: %v", c.Enabled)
+	}
+}
+
+func TestConfig_Validate(t *testing.T) {
+	c := continuous_querier.NewConfig()
+	if err := c.Validate(); err != nil {
+		t.Fatalf("unexpected validation fail from NewConfig: %s", err)
+	}
+
+	c = continuous_querier.NewConfig()
+	c.RunInterval = 0
+	if err := c.Validate(); err == nil {
+		t.Fatal("expected error for run-interval = 0, got nil")
+	}
+
+	c = continuous_querier.NewConfig()
+	c.RunInterval *= -1
+	if err := c.Validate(); err == nil {
+		t.Fatal("expected error for negative run-interval, got nil")
 	}
 }

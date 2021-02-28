@@ -1,3 +1,4 @@
+// Package help is the help subcommand of the freetsd-ctl command.
 package help
 
 import (
@@ -26,14 +27,20 @@ func (cmd *Command) Run(args ...string) error {
 }
 
 const usage = `
-Usage:
+Configure and start an FreeTSDB server.
 
-	freetsd-ctl [[command] [arguments]]
+Usage: freetsd-ctl [[command] [arguments]]
 
 The commands are:
 
     backup               downloads a snapshot of a data node and saves it to disk
+    config               display the default configuration
+    help                 display this help message
     restore              uses a snapshot of a data node to rebuild a cluster
+    run                  run node with existing configuration
+    version              displays the FreeTSDB version
 
-Use "freetsd-ctl help [command]" for more information about a command.
+"run" is the default command.
+
+Use "freetsd-ctl [command] -help" for more information about a command.
 `

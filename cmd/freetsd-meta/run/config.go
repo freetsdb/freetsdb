@@ -1,21 +1,22 @@
 package run
 
 import (
-	"errors"
 	"fmt"
+	"io/ioutil"
 	"os"
 	"os/user"
 	"path/filepath"
-	"reflect"
-	"strconv"
-	"strings"
-	"time"
 
+	"github.com/BurntSushi/toml"
+	"github.com/freetsdb/freetsdb/logger"
+	"github.com/freetsdb/freetsdb/pkg/tlsconfig"
 	"github.com/freetsdb/freetsdb/services/meta"
+	"golang.org/x/text/encoding/unicode"
+	"golang.org/x/text/transform"
 )
 
 const (
-	// DefaultBindAddress is the default address for raft, cluster, snapshot, etc..
+	// DefaultBindAddress is the default address for raft, snapshot, etc..
 	DefaultBindAddress = ":8088"
 
 	// DefaultHostname is the default hostname used if we are unable to determine
@@ -23,31 +24,29 @@ const (
 	DefaultHostname = "localhost"
 )
 
-// Config represents the configuration format for the freetsd binary.
+// Config represents the configuration format for the freetsd-meta binary.
 type Config struct {
-	Meta *meta.Config `toml:"meta"`
+	Meta    *meta.Config  `toml:"meta"`
+	Logging logger.Config `toml:"logging"`
 
-	// BindAddress is the address that all TCP services use (Raft, Snapshot, Coordinator, etc.)
+	// BindAddress is the address that all TCP services use (Raft, Snapshot, etc.)
 	BindAddress string `toml:"bind-address"`
 
 	// Hostname is the hostname portion to use when registering local
 	// addresses.  This hostname must be resolvable from other nodes.
 	Hostname string `toml:"hostname"`
+
+	// TLS provides configuration options for all https endpoints.
+	TLS tlsconfig.Config `toml:"tls"`
 }
 
 // NewConfig returns an instance of Config with reasonable defaults.
 func NewConfig() *Config {
 	c := &Config{}
 	c.Meta = meta.NewConfig()
+	c.Logging = logger.NewConfig()
 
 	c.BindAddress = DefaultBindAddress
-
-	// All ARRAY attributes have to be init after toml decode
-	// See: https://github.com/BurntSushi/toml/pull/68
-	// Those attributes will be initialized in Config.InitTableAttrs method
-	// Concerned Attributes:
-	//  * `c.Graphites`
-	//  * `c.UDPs`
 
 	return c
 }
@@ -72,124 +71,39 @@ func NewDemoConfig() (*Config, error) {
 	return c, nil
 }
 
+// FromTomlFile loads the config from a TOML file.
+func (c *Config) FromTomlFile(fpath string) error {
+	bs, err := ioutil.ReadFile(fpath)
+	if err != nil {
+		return err
+	}
+
+	// Handle any potential Byte-Order-Marks that may be in the config file.
+	// This is for Windows compatibility only.
+	bom := unicode.BOMOverride(transform.Nop)
+	bs, _, err = transform.Bytes(bom, bs)
+	if err != nil {
+		return err
+	}
+	return c.FromToml(string(bs))
+}
+
+// FromToml loads the config from TOML.
+func (c *Config) FromToml(input string) error {
+	_, err := toml.Decode(input, c)
+	return err
+}
+
 // Validate returns an error if the config is invalid.
 func (c *Config) Validate() error {
-	if !c.Meta.Enabled {
-		return errors.New("Meta, must be enabled")
+
+	if err := c.Meta.Validate(); err != nil {
+		return err
 	}
 
-	if c.Meta.Enabled {
-		if err := c.Meta.Validate(); err != nil {
-			return err
-		}
+	if err := c.TLS.Validate(); err != nil {
+		return err
 	}
 
-	return nil
-}
-
-// ApplyEnvOverrides apply the environment configuration on top of the config.
-func (c *Config) ApplyEnvOverrides() error {
-	return c.applyEnvOverrides("INFLUXDB", reflect.ValueOf(c))
-}
-
-func (c *Config) applyEnvOverrides(prefix string, spec reflect.Value) error {
-	// If we have a pointer, dereference it
-	s := spec
-	if spec.Kind() == reflect.Ptr {
-		s = spec.Elem()
-	}
-
-	// Make sure we have struct
-	if s.Kind() != reflect.Struct {
-		return nil
-	}
-
-	typeOfSpec := s.Type()
-	for i := 0; i < s.NumField(); i++ {
-		f := s.Field(i)
-		// Get the toml tag to determine what env var name to use
-		configName := typeOfSpec.Field(i).Tag.Get("toml")
-		// Replace hyphens with underscores to avoid issues with shells
-		configName = strings.Replace(configName, "-", "_", -1)
-		fieldKey := typeOfSpec.Field(i).Name
-
-		// Skip any fields that we cannot set
-		if f.CanSet() || f.Kind() == reflect.Slice {
-
-			// Use the upper-case prefix and toml name for the env var
-			key := strings.ToUpper(configName)
-			if prefix != "" {
-				key = strings.ToUpper(fmt.Sprintf("%s_%s", prefix, configName))
-			}
-			value := os.Getenv(key)
-
-			// If the type is s slice, apply to each using the index as a suffix
-			// e.g. GRAPHITE_0
-			if f.Kind() == reflect.Slice || f.Kind() == reflect.Array {
-				for i := 0; i < f.Len(); i++ {
-					if err := c.applyEnvOverrides(fmt.Sprintf("%s_%d", key, i), f.Index(i)); err != nil {
-						return err
-					}
-				}
-				continue
-			}
-
-			// If it's a sub-config, recursively apply
-			if f.Kind() == reflect.Struct || f.Kind() == reflect.Ptr {
-				if err := c.applyEnvOverrides(key, f); err != nil {
-					return err
-				}
-				continue
-			}
-
-			// Skip any fields we don't have a value to set
-			if value == "" {
-				continue
-			}
-
-			switch f.Kind() {
-			case reflect.String:
-				f.SetString(value)
-			case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
-
-				var intValue int64
-
-				// Handle toml.Duration
-				if f.Type().Name() == "Duration" {
-					dur, err := time.ParseDuration(value)
-					if err != nil {
-						return fmt.Errorf("failed to apply %v to %v using type %v and value '%v'", key, fieldKey, f.Type().String(), value)
-					}
-					intValue = dur.Nanoseconds()
-				} else {
-					var err error
-					intValue, err = strconv.ParseInt(value, 0, f.Type().Bits())
-					if err != nil {
-						return fmt.Errorf("failed to apply %v to %v using type %v and value '%v'", key, fieldKey, f.Type().String(), value)
-					}
-				}
-
-				f.SetInt(intValue)
-			case reflect.Bool:
-				boolValue, err := strconv.ParseBool(value)
-				if err != nil {
-					return fmt.Errorf("failed to apply %v to %v using type %v and value '%v'", key, fieldKey, f.Type().String(), value)
-
-				}
-				f.SetBool(boolValue)
-			case reflect.Float32, reflect.Float64:
-				floatValue, err := strconv.ParseFloat(value, f.Type().Bits())
-				if err != nil {
-					return fmt.Errorf("failed to apply %v to %v using type %v and value '%v'", key, fieldKey, f.Type().String(), value)
-
-				}
-				f.SetFloat(floatValue)
-			default:
-				if err := c.applyEnvOverrides(key, f); err != nil {
-					return err
-				}
-			}
-		}
-	}
 	return nil
 }

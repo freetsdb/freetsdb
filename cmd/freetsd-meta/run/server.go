@@ -1,6 +1,7 @@
 package run
 
 import (
+	"crypto/tls"
 	"fmt"
 	"log"
 	"net"
@@ -47,7 +48,6 @@ type Server struct {
 
 	Node *freetsdb.Node
 
-	MetaClient  *meta.Client
 	MetaService *meta.Service
 
 	// Profiling
@@ -69,8 +69,17 @@ type Server struct {
 	config *Config
 }
 
+// updateTLSConfig stores with into the tls config pointed at by into but only if with is not nil
+// and into is nil. Think of it as setting the default value.
+func updateTLSConfig(into **tls.Config, with *tls.Config) {
+	if with != nil && into != nil && *into == nil {
+		*into = with
+	}
+}
+
 // NewServer returns a new instance of Server built from a config.
 func NewServer(c *Config, buildInfo *BuildInfo) (*Server, error) {
+
 	// We need to ensure that a meta directory always exists even if
 	// we don't start the meta store.  node.json is always stored under
 	// the meta directory.
@@ -106,10 +115,6 @@ func NewServer(c *Config, buildInfo *BuildInfo) (*Server, error) {
 		bind = c.Meta.BindAddress
 	}
 
-	if !c.Meta.Enabled {
-		return nil, fmt.Errorf("Must run as meta node")
-	}
-
 	s := &Server{
 		buildInfo: *buildInfo,
 		err:       make(chan error),
@@ -128,11 +133,9 @@ func NewServer(c *Config, buildInfo *BuildInfo) (*Server, error) {
 		config: c,
 	}
 
-	if c.Meta.Enabled {
-		s.MetaService = meta.NewService(c.Meta)
-		s.MetaService.Version = s.buildInfo.Version
-		s.MetaService.Node = s.Node
-	}
+	s.MetaService = meta.NewService(c.Meta)
+	s.MetaService.Version = s.buildInfo.Version
+	s.MetaService.Node = s.Node
 
 	return s, nil
 }
@@ -184,7 +187,6 @@ func (s *Server) Close() error {
 		s.Listener.Close()
 	}
 
-	// Finally close the meta-store since everything else depends on it
 	if s.MetaService != nil {
 		s.MetaService.Close()
 	}
@@ -230,9 +232,11 @@ func (s *Server) remoteAddr(addr string) string {
 	return remote
 }
 
-// MetaServers returns the meta node HTTP addresses used by this server.
-func (s *Server) MetaServers() []string {
-	return s.MetaClient.MetaServers()
+// Service represents a service attached to the server.
+type Service interface {
+	WithLogger(log *zap.Logger)
+	Open() error
+	Close() error
 }
 
 // prof stores the file locations of active profiles.
@@ -278,8 +282,3 @@ func stopProfile() {
 		log.Println("mem profile stopped")
 	}
 }
-
-type tcpaddr struct{ host string }
-
-func (a *tcpaddr) Network() string { return "tcp" }
-func (a *tcpaddr) String() string  { return a.host }

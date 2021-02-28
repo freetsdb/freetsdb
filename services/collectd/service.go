@@ -1,24 +1,27 @@
+// Package collectd provides a service for FreeTSDB to ingest data via the collectd protocol.
 package collectd // import "github.com/freetsdb/freetsdb/services/collectd"
 
 import (
-	"expvar"
+	"bytes"
 	"fmt"
+	"io/ioutil"
 	"net"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
-	"github.com/freetsdb/freetsdb"
+	"collectd.org/api"
+	"collectd.org/network"
 	"github.com/freetsdb/freetsdb/coordinator"
 	"github.com/freetsdb/freetsdb/logger"
 	"github.com/freetsdb/freetsdb/models"
 	"github.com/freetsdb/freetsdb/services/meta"
 	"github.com/freetsdb/freetsdb/tsdb"
-	"github.com/kimor79/gollectd"
 	"go.uber.org/zap"
 )
-
-const leaderWaitTimeout = 30 * time.Second
 
 // statistics gathered by the collectd service.
 const (
@@ -26,7 +29,7 @@ const (
 	statBytesReceived        = "bytesRx"
 	statPointsParseFail      = "pointsParseFail"
 	statReadFail             = "readFail"
-	statBatchesTrasmitted    = "batchesTx"
+	statBatchesTransmitted   = "batchesTx"
 	statPointsTransmitted    = "pointsTx"
 	statBatchesTransmitFail  = "batchesTxFail"
 	statDroppedPointsInvalid = "droppedPointsInvalid"
@@ -34,12 +37,22 @@ const (
 
 // pointsWriter is an internal interface to make testing easier.
 type pointsWriter interface {
-	WritePoints(p *coordinator.WritePointsRequest) error
+	WritePointsPrivileged(database, retentionPolicy string, consistencyLevel coordinator.ConsistencyLevel, points []models.Point) error
 }
 
-// metaStore is an internal interface to make testing easier.
+// metaClient is an internal interface to make testing easier.
 type metaClient interface {
 	CreateDatabase(name string) (*meta.DatabaseInfo, error)
+}
+
+// TypesDBFile reads a collectd types db from a file.
+func TypesDBFile(path string) (typesdb *api.TypesDB, err error) {
+	var reader *os.File
+	reader, err = os.Open(path)
+	if err == nil {
+		typesdb, err = api.NewTypesDB(reader)
+	}
+	return
 }
 
 // Service represents a UDP server which receives metrics in collectd's binary
@@ -51,37 +64,45 @@ type Service struct {
 	Logger       *zap.Logger
 
 	wg      sync.WaitGroup
-	err     chan error
-	stop    chan struct{}
 	conn    *net.UDPConn
 	batcher *tsdb.PointBatcher
-	typesdb gollectd.Types
+	popts   network.ParseOpts
 	addr    net.Addr
 
+	mu    sync.RWMutex
+	ready bool          // Has the required database been created?
+	done  chan struct{} // Is the service closing or closed?
+
 	// expvar-based stats.
-	statMap *expvar.Map
+	stats       *Statistics
+	defaultTags models.StatisticTags
 }
 
 // NewService returns a new instance of the collectd service.
 func NewService(c Config) *Service {
-	s := &Service{
-		Config: &c,
-		Logger: zap.NewNop(),
-		err:    make(chan error),
+	s := Service{
+		// Use defaults where necessary.
+		Config: c.WithDefaults(),
+
+		Logger:      zap.NewNop(),
+		stats:       &Statistics{},
+		defaultTags: models.StatisticTags{"bind": c.BindAddress},
 	}
 
-	return s
+	return &s
 }
 
 // Open starts the service.
 func (s *Service) Open() error {
-	s.Logger.Info("Starting collectd service")
+	s.mu.Lock()
+	defer s.mu.Unlock()
 
-	// Configure expvar monitoring. It's OK to do this even if the service fails to open and
-	// should be done before any data could arrive for the service.
-	key := strings.Join([]string{"collectd", s.Config.BindAddress}, ":")
-	tags := map[string]string{"bind": s.Config.BindAddress}
-	s.statMap = freetsdb.NewStatistics(key, "collectd", tags)
+	if s.done != nil {
+		return nil // Already open.
+	}
+	s.done = make(chan struct{})
+
+	s.Logger.Info("Starting collectd service")
 
 	if s.Config.BindAddress == "" {
 		return fmt.Errorf("bind address is blank")
@@ -91,18 +112,67 @@ func (s *Service) Open() error {
 		return fmt.Errorf("PointsWriter is nil")
 	}
 
-	if _, err := s.MetaClient.CreateDatabase(s.Config.Database); err != nil {
-		s.Logger.Info("Failed to ensure target database", logger.Database(s.Config.Database), zap.Error(err))
-		return err
+	if s.popts.TypesDB == nil {
+		// Open collectd types.
+		if stat, err := os.Stat(s.Config.TypesDB); err != nil {
+			return fmt.Errorf("Stat(): %s", err)
+		} else if stat.IsDir() {
+			alltypesdb, err := api.NewTypesDB(&bytes.Buffer{})
+			if err != nil {
+				return err
+			}
+			var readdir func(path string)
+			readdir = func(path string) {
+				files, err := ioutil.ReadDir(path)
+				if err != nil {
+					s.Logger.Info("Unable to read directory",
+						zap.String("path", path), zap.Error(err))
+					return
+				}
+
+				for _, f := range files {
+					fullpath := filepath.Join(path, f.Name())
+					if f.IsDir() {
+						readdir(fullpath)
+						continue
+					}
+
+					s.Logger.Info("Loading types from file", zap.String("path", fullpath))
+					types, err := TypesDBFile(fullpath)
+					if err != nil {
+						s.Logger.Info("Unable to parse collectd types file", zap.String("path", f.Name()))
+						continue
+					}
+
+					alltypesdb.Merge(types)
+				}
+			}
+			readdir(s.Config.TypesDB)
+			s.popts.TypesDB = alltypesdb
+		} else {
+			s.Logger.Info("Loading types from file", zap.String("path", s.Config.TypesDB))
+			types, err := TypesDBFile(s.Config.TypesDB)
+			if err != nil {
+				return fmt.Errorf("Open(): %s", err)
+			}
+			s.popts.TypesDB = types
+		}
 	}
 
-	if s.typesdb == nil {
-		// Open collectd types.
-		typesdb, err := gollectd.TypesDBFile(s.Config.TypesDB)
-		if err != nil {
-			return fmt.Errorf("Open(): %s", err)
-		}
-		s.typesdb = typesdb
+	// Sets the security level according to the config.
+	// Default not necessary because we validate the config.
+	switch s.Config.SecurityLevel {
+	case "none":
+		s.popts.SecurityLevel = network.None
+	case "sign":
+		s.popts.SecurityLevel = network.Sign
+	case "encrypt":
+		s.popts.SecurityLevel = network.Encrypt
+	}
+
+	// Sets the auth file according to the config.
+	if s.popts.PasswordLookup == nil {
+		s.popts.PasswordLookup = network.NewAuthFile(s.Config.AuthFile)
 	}
 
 	// Resolve our address.
@@ -133,61 +203,130 @@ func (s *Service) Open() error {
 	s.batcher = tsdb.NewPointBatcher(s.Config.BatchSize, s.Config.BatchPending, time.Duration(s.Config.BatchDuration))
 	s.batcher.Start()
 
-	// Create channel and wait group for signalling goroutines to stop.
-	s.stop = make(chan struct{})
+	// Create waitgroup for signalling goroutines to stop and start goroutines
+	// that process collectd packets.
 	s.wg.Add(2)
-
-	// Start goroutines that process collectd packets.
-	go s.serve()
-	go s.writePoints()
+	go func() { defer s.wg.Done(); s.serve() }()
+	go func() { defer s.wg.Done(); s.writePoints() }()
 
 	return nil
 }
 
 // Close stops the service.
 func (s *Service) Close() error {
-	// Close the connection, and wait for the goroutine to exit.
-	if s.stop != nil {
-		close(s.stop)
+	if wait := func() bool {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+
+		if s.closed() {
+			return false
+		}
+		close(s.done)
+
+		// Close the connection, and wait for the goroutine to exit.
+		if s.conn != nil {
+			s.conn.Close()
+		}
+		if s.batcher != nil {
+			s.batcher.Stop()
+		}
+		return true
+	}(); !wait {
+		return nil // Already closed.
 	}
-	if s.conn != nil {
-		s.conn.Close()
-	}
-	if s.batcher != nil {
-		s.batcher.Stop()
-	}
+
+	// Wait with the lock unlocked.
 	s.wg.Wait()
 
 	// Release all remaining resources.
-	s.stop = nil
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
 	s.conn = nil
 	s.batcher = nil
-	s.Logger.Info("collectd UDP closed")
+	s.Logger.Info("Closed collectd service")
+	s.done = nil
 	return nil
 }
 
-// WithLogger sets the logger on the service.
+func (s *Service) closed() bool {
+	select {
+	case <-s.done:
+		// Service is closing.
+		return true
+	default:
+	}
+	return s.done == nil
+}
+
+// createInternalStorage ensures that the required database has been created.
+func (s *Service) createInternalStorage() error {
+	s.mu.RLock()
+	ready := s.ready
+	s.mu.RUnlock()
+	if ready {
+		return nil
+	}
+
+	if _, err := s.MetaClient.CreateDatabase(s.Config.Database); err != nil {
+		return err
+	}
+
+	// The service is now ready.
+	s.mu.Lock()
+	s.ready = true
+	s.mu.Unlock()
+	return nil
+}
+
+// WithLogger sets the service's logger.
 func (s *Service) WithLogger(log *zap.Logger) {
 	s.Logger = log.With(zap.String("service", "collectd"))
 }
 
+// Statistics maintains statistics for the collectd service.
+type Statistics struct {
+	PointsReceived       int64
+	BytesReceived        int64
+	PointsParseFail      int64
+	ReadFail             int64
+	BatchesTransmitted   int64
+	PointsTransmitted    int64
+	BatchesTransmitFail  int64
+	InvalidDroppedPoints int64
+}
+
+// Statistics returns statistics for periodic monitoring.
+func (s *Service) Statistics(tags map[string]string) []models.Statistic {
+	return []models.Statistic{{
+		Name: "collectd",
+		Tags: s.defaultTags.Merge(tags),
+		Values: map[string]interface{}{
+			statPointsReceived:       atomic.LoadInt64(&s.stats.PointsReceived),
+			statBytesReceived:        atomic.LoadInt64(&s.stats.BytesReceived),
+			statPointsParseFail:      atomic.LoadInt64(&s.stats.PointsParseFail),
+			statReadFail:             atomic.LoadInt64(&s.stats.ReadFail),
+			statBatchesTransmitted:   atomic.LoadInt64(&s.stats.BatchesTransmitted),
+			statPointsTransmitted:    atomic.LoadInt64(&s.stats.PointsTransmitted),
+			statBatchesTransmitFail:  atomic.LoadInt64(&s.stats.BatchesTransmitFail),
+			statDroppedPointsInvalid: atomic.LoadInt64(&s.stats.InvalidDroppedPoints),
+		},
+	}}
+}
+
 // SetTypes sets collectd types db.
 func (s *Service) SetTypes(types string) (err error) {
-	s.typesdb, err = gollectd.TypesDB([]byte(types))
+	reader := strings.NewReader(types)
+	s.popts.TypesDB, err = api.NewTypesDB(reader)
 	return
 }
 
-// Err returns a channel for fatal errors that occur on go routines.
-func (s *Service) Err() chan error { return s.err }
-
-// Addr returns the listener's address. Returns nil if listener is closed.
+// Addr returns the listener's address. It returns nil if listener is closed.
 func (s *Service) Addr() net.Addr {
 	return s.conn.LocalAddr()
 }
 
 func (s *Service) serve() {
-	defer s.wg.Done()
-
 	// From https://collectd.org/wiki/index.php/Binary_protocol
 	//   1024 bytes (payload only, not including UDP / IP headers)
 	//   In versions 4.0 through 4.7, the receive buffer has a fixed size
@@ -200,7 +339,7 @@ func (s *Service) serve() {
 
 	for {
 		select {
-		case <-s.stop:
+		case <-s.done:
 			// We closed the connection, time to go.
 			return
 		default:
@@ -209,111 +348,160 @@ func (s *Service) serve() {
 
 		n, _, err := s.conn.ReadFromUDP(buffer)
 		if err != nil {
-			s.statMap.Add(statReadFail, 1)
-			s.Logger.Info("collectd ReadFromUDP error", zap.Error(err))
+			if strings.Contains(err.Error(), "use of closed network connection") {
+				select {
+				case <-s.done:
+					return
+				default:
+					// The socket wasn't closed by us so consider it an error.
+				}
+			}
+			atomic.AddInt64(&s.stats.ReadFail, 1)
+			s.Logger.Info("ReadFromUDP error", zap.Error(err))
 			continue
 		}
 		if n > 0 {
-			s.statMap.Add(statBytesReceived, int64(n))
+			atomic.AddInt64(&s.stats.BytesReceived, int64(n))
 			s.handleMessage(buffer[:n])
 		}
 	}
 }
 
 func (s *Service) handleMessage(buffer []byte) {
-	packets, err := gollectd.Packets(buffer, s.typesdb)
+	valueLists, err := network.Parse(buffer, s.popts)
 	if err != nil {
-		s.statMap.Add(statPointsParseFail, 1)
-		s.Logger.Info("Collectd parse error", zap.Error(err))
+		atomic.AddInt64(&s.stats.PointsParseFail, 1)
+		s.Logger.Info("collectd parse error", zap.Error(err))
 		return
 	}
-	for _, packet := range *packets {
-		points := s.UnmarshalCollectd(&packet)
+	var points []models.Point
+	for _, valueList := range valueLists {
+		if s.Config.ParseMultiValuePlugin == "join" {
+			points = s.UnmarshalValueListPacked(valueList)
+		} else {
+			points = s.UnmarshalValueList(valueList)
+		}
 		for _, p := range points {
 			s.batcher.In() <- p
 		}
-		s.statMap.Add(statPointsReceived, int64(len(points)))
+		atomic.AddInt64(&s.stats.PointsReceived, int64(len(points)))
 	}
 }
 
 func (s *Service) writePoints() {
-	defer s.wg.Done()
-
 	for {
 		select {
-		case <-s.stop:
+		case <-s.done:
 			return
 		case batch := <-s.batcher.Out():
-			if err := s.PointsWriter.WritePoints(&coordinator.WritePointsRequest{
-				Database:         s.Config.Database,
-				RetentionPolicy:  s.Config.RetentionPolicy,
-				ConsistencyLevel: coordinator.ConsistencyLevelAny,
-				Points:           batch,
-			}); err == nil {
-				s.statMap.Add(statBatchesTrasmitted, 1)
-				s.statMap.Add(statPointsTransmitted, int64(len(batch)))
+			// Will attempt to create database if not yet created.
+			if err := s.createInternalStorage(); err != nil {
+				s.Logger.Info("Required database not yet created",
+					logger.Database(s.Config.Database), zap.Error(err))
+				continue
+			}
+
+			if err := s.PointsWriter.WritePointsPrivileged(s.Config.Database, s.Config.RetentionPolicy, coordinator.ConsistencyLevelAny, batch); err == nil {
+				atomic.AddInt64(&s.stats.BatchesTransmitted, 1)
+				atomic.AddInt64(&s.stats.PointsTransmitted, int64(len(batch)))
 			} else {
-				s.Logger.Info("Failed to write point batch",
-					logger.Database(s.Config.Database),
-					zap.Error(err))
-				s.statMap.Add(statBatchesTransmitFail, 1)
+				s.Logger.Info("Failed to write point batch to database",
+					logger.Database(s.Config.Database), zap.Error(err))
+				atomic.AddInt64(&s.stats.BatchesTransmitFail, 1)
 			}
 		}
 	}
 }
 
-// Unmarshal translates a collectd packet into FreeTSDB data points.
-func (s *Service) UnmarshalCollectd(packet *gollectd.Packet) []models.Point {
-	// Prefer high resolution timestamp.
-	var timestamp time.Time
-	if packet.TimeHR > 0 {
-		// TimeHR is "near" nanosecond measurement, but not exactly nanasecond time
-		// Since we store time in microseconds, we round here (mostly so tests will work easier)
-		sec := packet.TimeHR >> 30
-		// Shifting, masking, and dividing by 1 billion to get nanoseconds.
-		nsec := ((packet.TimeHR & 0x3FFFFFFF) << 30) / 1000 / 1000 / 1000
-		timestamp = time.Unix(int64(sec), int64(nsec)).UTC().Round(time.Microsecond)
-	} else {
-		// If we don't have high resolution time, fall back to basic unix time
-		timestamp = time.Unix(int64(packet.Time), 0).UTC()
+// UnmarshalValueListPacked is an alternative to the original UnmarshalValueList.
+// The difference is that the original provided measurements like (PLUGIN_DSNAME, ["value",xxx])
+// while this one will provide measurements like (PLUGIN, {["DSNAME",xxx]}).
+// This effectively joins collectd data that should go together, such as:
+// (df, {["used",1000],["free",2500]}).
+func (s *Service) UnmarshalValueListPacked(vl *api.ValueList) []models.Point {
+	timestamp := vl.Time.UTC()
+
+	var name = vl.Identifier.Plugin
+	tags := make(map[string]string, 4)
+	fields := make(map[string]interface{}, len(vl.Values))
+
+	if vl.Identifier.Host != "" {
+		tags["host"] = vl.Identifier.Host
+	}
+	if vl.Identifier.PluginInstance != "" {
+		tags["instance"] = vl.Identifier.PluginInstance
+	}
+	if vl.Identifier.Type != "" {
+		tags["type"] = vl.Identifier.Type
+	}
+	if vl.Identifier.TypeInstance != "" {
+		tags["type_instance"] = vl.Identifier.TypeInstance
 	}
 
+	for i, v := range vl.Values {
+		fieldName := vl.DSName(i)
+		switch value := v.(type) {
+		case api.Gauge:
+			fields[fieldName] = float64(value)
+		case api.Derive:
+			fields[fieldName] = float64(value)
+		case api.Counter:
+			fields[fieldName] = float64(value)
+		}
+	}
+	// Drop invalid points
+	p, err := models.NewPoint(name, models.NewTags(tags), fields, timestamp)
+	if err != nil {
+		s.Logger.Info("Dropping point", zap.String("name", name), zap.Error(err))
+		atomic.AddInt64(&s.stats.InvalidDroppedPoints, 1)
+		return nil
+	}
+
+	return []models.Point{p}
+}
+
+// UnmarshalValueList translates a ValueList into FreeTSDB data points.
+func (s *Service) UnmarshalValueList(vl *api.ValueList) []models.Point {
+	timestamp := vl.Time.UTC()
+
 	var points []models.Point
-	for i := range packet.Values {
-		name := fmt.Sprintf("%s_%s", packet.Plugin, packet.Values[i].Name)
-		tags := make(map[string]string)
-		fields := make(map[string]interface{})
+	for i := range vl.Values {
+		name := fmt.Sprintf("%s_%s", vl.Identifier.Plugin, vl.DSName(i))
+		tags := make(map[string]string, 4)
+		fields := make(map[string]interface{}, 1)
 
-		fields["value"] = packet.Values[i].Value
+		// Convert interface back to actual type, then to float64
+		switch value := vl.Values[i].(type) {
+		case api.Gauge:
+			fields["value"] = float64(value)
+		case api.Derive:
+			fields["value"] = float64(value)
+		case api.Counter:
+			fields["value"] = float64(value)
+		}
 
-		if packet.Hostname != "" {
-			tags["host"] = packet.Hostname
+		if vl.Identifier.Host != "" {
+			tags["host"] = vl.Identifier.Host
 		}
-		if packet.PluginInstance != "" {
-			tags["instance"] = packet.PluginInstance
+		if vl.Identifier.PluginInstance != "" {
+			tags["instance"] = vl.Identifier.PluginInstance
 		}
-		if packet.Type != "" {
-			tags["type"] = packet.Type
+		if vl.Identifier.Type != "" {
+			tags["type"] = vl.Identifier.Type
 		}
-		if packet.TypeInstance != "" {
-			tags["type_instance"] = packet.TypeInstance
+		if vl.Identifier.TypeInstance != "" {
+			tags["type_instance"] = vl.Identifier.TypeInstance
 		}
-		p, err := models.NewPoint(name, tags, fields, timestamp)
+
 		// Drop invalid points
+		p, err := models.NewPoint(name, models.NewTags(tags), fields, timestamp)
 		if err != nil {
 			s.Logger.Info("Dropping point", zap.String("name", name), zap.Error(err))
-			s.statMap.Add(statDroppedPointsInvalid, 1)
+			atomic.AddInt64(&s.stats.InvalidDroppedPoints, 1)
 			continue
 		}
 
 		points = append(points, p)
 	}
 	return points
-}
-
-// assert will panic with a given formatted message if the given condition is false.
-func assert(condition bool, msg string, v ...interface{}) {
-	if !condition {
-		panic(fmt.Sprintf("assert failed: "+msg, v...))
-	}
 }

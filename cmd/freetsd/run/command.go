@@ -1,3 +1,4 @@
+// Package run is the run (default) subcommand for the freetsd command.
 package run
 
 import (
@@ -6,13 +7,16 @@ import (
 	"io"
 	"io/ioutil"
 	"log"
+	"net/http"
+	_ "net/http/pprof"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strconv"
 	"time"
 
-	"github.com/BurntSushi/toml"
+	"github.com/freetsdb/freetsdb/logger"
+	"go.uber.org/zap"
 )
 
 const logo = `
@@ -33,13 +37,18 @@ type Command struct {
 	BuildTime string
 
 	closing chan struct{}
+	pidfile string
 	Closed  chan struct{}
 
 	Stdin  io.Reader
 	Stdout io.Writer
 	Stderr io.Writer
+	Logger *zap.Logger
 
 	Server *Server
+
+	// How to get environment variables. Normally set to os.Getenv, except for tests.
+	Getenv func(string) string
 }
 
 // NewCommand return a new instance of Command.
@@ -50,6 +59,7 @@ func NewCommand() *Command {
 		Stdin:   os.Stdin,
 		Stdout:  os.Stdout,
 		Stderr:  os.Stderr,
+		Logger:  zap.NewNop(),
 	}
 }
 
@@ -61,36 +71,15 @@ func (cmd *Command) Run(args ...string) error {
 		return err
 	}
 
-	// Print sweet FreeTSDB logo.
-	fmt.Print(logo)
-
-	// Set parallelism.
-	runtime.GOMAXPROCS(runtime.NumCPU())
-
-	// Mark start-up in log.
-	log.Printf("FreeTSDB starting, version %s, branch %s, commit %s",
-		cmd.Version, cmd.Branch, cmd.Commit)
-	log.Printf("Go version %s, GOMAXPROCS set to %d", runtime.Version(), runtime.GOMAXPROCS(0))
-
-	// Write the PID file.
-	if err := cmd.writePIDFile(options.PIDFile); err != nil {
-		return fmt.Errorf("write pid file: %s", err)
-	}
-
-	// Turn on block profiling to debug stuck databases
-	runtime.SetBlockProfileRate(int(1 * time.Second))
-
-	// Parse config
-	config, err := cmd.ParseConfig(options.ConfigPath)
+	config, err := cmd.ParseConfig(options.GetConfigPath())
 	if err != nil {
 		return fmt.Errorf("parse config: %s", err)
 	}
 
 	// Apply any environment variables on top of the parsed config
-	if err := config.ApplyEnvOverrides(); err != nil {
+	if err := config.ApplyEnvOverrides(cmd.Getenv); err != nil {
 		return fmt.Errorf("apply env config: %v", err)
 	}
-
 	if options.Hostname != "" {
 		config.Hostname = options.Hostname
 	}
@@ -98,6 +87,50 @@ func (cmd *Command) Run(args ...string) error {
 	// Validate the configuration.
 	if err := config.Validate(); err != nil {
 		return fmt.Errorf("%s. To generate a valid configuration file run `freetsd config > freetsdb.generated.conf`", err)
+	}
+
+	var logErr error
+	if cmd.Logger, logErr = config.Logging.New(cmd.Stderr); logErr != nil {
+		// assign the default logger
+		cmd.Logger = logger.New(cmd.Stderr)
+	}
+
+	// Attempt to run pprof on :6060 before startup if debug pprof enabled.
+	if config.HTTPD.DebugPprofEnabled {
+		runtime.SetBlockProfileRate(int(1 * time.Second))
+		runtime.SetMutexProfileFraction(1)
+		go func() { http.ListenAndServe("localhost:6060", nil) }()
+	}
+
+	// Print sweet FreeTSDB logo.
+	if !config.Logging.SuppressLogo && logger.IsTerminal(cmd.Stdout) {
+		fmt.Fprint(cmd.Stdout, logo)
+	}
+
+	// Mark start-up in log.
+	cmd.Logger.Info("FreeTSDB starting",
+		zap.String("version", cmd.Version),
+		zap.String("branch", cmd.Branch),
+		zap.String("commit", cmd.Commit))
+	cmd.Logger.Info("Go runtime",
+		zap.String("version", runtime.Version()),
+		zap.Int("maxprocs", runtime.GOMAXPROCS(0)))
+
+	// If there was an error on startup when creating the logger, output it now.
+	if logErr != nil {
+		cmd.Logger.Error("Unable to configure logger", zap.Error(logErr))
+	}
+
+	// Write the PID file.
+	if err := cmd.writePIDFile(options.PIDFile); err != nil {
+		return fmt.Errorf("write pid file: %s", err)
+	}
+	cmd.pidfile = options.PIDFile
+
+	if config.HTTPD.PprofEnabled {
+		// Turn on block and mutex profiling.
+		runtime.SetBlockProfileRate(int(1 * time.Second))
+		runtime.SetMutexProfileFraction(1) // Collect every sample
 	}
 
 	// Create server from config and start it.
@@ -111,6 +144,7 @@ func (cmd *Command) Run(args ...string) error {
 	if err != nil {
 		return fmt.Errorf("create server: %s", err)
 	}
+	s.Logger = cmd.Logger
 	s.CPUProfile = options.CPUProfile
 	s.MemProfile = options.MemProfile
 	if err := s.Open(); err != nil {
@@ -127,6 +161,7 @@ func (cmd *Command) Run(args ...string) error {
 // Close shuts down the server.
 func (cmd *Command) Close() error {
 	defer close(cmd.Closed)
+	defer cmd.removePIDFile()
 	close(cmd.closing)
 	if cmd.Server != nil {
 		return cmd.Server.Close()
@@ -146,12 +181,21 @@ func (cmd *Command) monitorServerErrors() {
 	}
 }
 
+func (cmd *Command) removePIDFile() {
+	if cmd.pidfile != "" {
+		if err := os.Remove(cmd.pidfile); err != nil {
+			cmd.Logger.Error("Unable to remove pidfile", zap.Error(err))
+		}
+	}
+}
+
 // ParseFlags parses the command line flags from args and returns an options set.
 func (cmd *Command) ParseFlags(args ...string) (Options, error) {
 	var options Options
 	fs := flag.NewFlagSet("", flag.ContinueOnError)
 	fs.StringVar(&options.ConfigPath, "config", "", "")
 	fs.StringVar(&options.PIDFile, "pidfile", "", "")
+	fs.StringVar(&options.Join, "join", "", "")
 	fs.StringVar(&options.Hostname, "hostname", "", "")
 	fs.StringVar(&options.CPUProfile, "cpuprofile", "", "")
 	fs.StringVar(&options.MemProfile, "memprofile", "", "")
@@ -159,6 +203,7 @@ func (cmd *Command) ParseFlags(args ...string) (Options, error) {
 	if err := fs.Parse(args); err != nil {
 		return Options{}, err
 	}
+
 	return options, nil
 }
 
@@ -170,8 +215,7 @@ func (cmd *Command) writePIDFile(path string) error {
 	}
 
 	// Ensure the required directory structure exists.
-	err := os.MkdirAll(filepath.Dir(path), 0777)
-	if err != nil {
+	if err := os.MkdirAll(filepath.Dir(path), 0777); err != nil {
 		return fmt.Errorf("mkdir: %s", err)
 	}
 
@@ -185,50 +229,77 @@ func (cmd *Command) writePIDFile(path string) error {
 }
 
 // ParseConfig parses the config at path.
-// Returns a demo configuration if path is blank.
+// It returns a demo configuration if path is blank.
 func (cmd *Command) ParseConfig(path string) (*Config, error) {
 	// Use demo configuration if no config path is specified.
 	if path == "" {
-		log.Println("no configuration provided, using default settings")
+		cmd.Logger.Info("No configuration provided, using default settings")
 		return NewDemoConfig()
 	}
 
-	log.Printf("Using configuration at: %s\n", path)
+	cmd.Logger.Info("Loading configuration file", zap.String("path", path))
 
 	config := NewConfig()
-	if _, err := toml.DecodeFile(path, &config); err != nil {
+	if err := config.FromTomlFile(path); err != nil {
 		return nil, err
 	}
 
 	return config, nil
 }
 
-var usage = `usage: run [flags]
+const usage = `Runs the FreeTSDB server.
 
-run starts the FreeTSDB server.
+Usage: freetsd run [flags]
 
-        -config <path>
-                          Set the path to the configuration file.
-
-        -hostname <name>
-                          Override the hostname, the 'hostname' configuration
-                          option will be overridden.
-
-        -pidfile <path>
-                          Write process ID to a file.
-
-        -cpuprofile <path>
-                          Write CPU profiling information to a file.
-
-        -memprofile <path>
-                          Write memory usage information to a file.
+    -config <path>
+            Set the path to the configuration file.
+            This defaults to the environment variable FREETSDB_CONFIG_PATH,
+            ~/.freetsdb/freetsdb.conf, or /etc/freetsdb/freetsdb.conf if a file
+            is present at any of these locations.
+            Disable the automatic loading of a configuration file using
+            the null device (such as /dev/null).
+    -pidfile <path>
+            Write process ID to a file.
+    -cpuprofile <path>
+            Write CPU profiling information to a file.
+    -memprofile <path>
+            Write memory usage information to a file.
 `
 
 // Options represents the command line options that can be parsed.
 type Options struct {
 	ConfigPath string
 	PIDFile    string
+	Join       string
 	Hostname   string
 	CPUProfile string
 	MemProfile string
+}
+
+// GetConfigPath returns the config path from the options.
+// It will return a path by searching in this order:
+//   1. The CLI option in ConfigPath
+//   2. The environment variable FREETSDB_CONFIG_PATH
+//   3. The first freetsdb.conf file on the path:
+//        - ~/.freetsdb
+//        - /etc/freetsdb
+func (opt *Options) GetConfigPath() string {
+	if opt.ConfigPath != "" {
+		if opt.ConfigPath == os.DevNull {
+			return ""
+		}
+		return opt.ConfigPath
+	} else if envVar := os.Getenv("FREETSDB_CONFIG_PATH"); envVar != "" {
+		return envVar
+	}
+
+	for _, path := range []string{
+		os.ExpandEnv("${HOME}/.freetsdb/freetsdb.conf"),
+		"/etc/freetsdb/freetsdb.conf",
+	} {
+		if _, err := os.Stat(path); err == nil {
+			return path
+		}
+	}
+	return ""
 }

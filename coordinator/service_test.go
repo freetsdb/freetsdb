@@ -43,7 +43,7 @@ func newTestWriteService(f func(shardID uint64, points []models.Point) error) te
 	}
 
 	mux := tcp.NewMux()
-	muxln := mux.Listen(cluster.MuxHeader)
+	muxln := mux.Listen(coordinator.MuxHeader)
 	go mux.Serve(ln)
 
 	s := testService{
@@ -100,9 +100,9 @@ func (ts *testService) ResponseN(n int) ([]*serviceResponse, error) {
 	}
 }
 
-// Service is a test wrapper for cluster.Service.
+// Service is a test wrapper for coordinator.Service.
 type Service struct {
-	*cluster.Service
+	*coordinator.Service
 
 	ln        net.Listener
 	TSDBStore TSDBStore
@@ -111,7 +111,7 @@ type Service struct {
 // NewService returns a new instance of Service.
 func NewService() *Service {
 	s := &Service{
-		Service: cluster.NewService(cluster.Config{}),
+		Service: coordinator.NewService(coordinator.Config{}),
 	}
 	s.Service.TSDBStore = &s.TSDBStore
 	return s
@@ -156,7 +156,7 @@ func (ln *muxListener) Accept() (net.Conn, error) {
 	if _, err := io.ReadFull(conn, buf[:]); err != nil {
 		conn.Close()
 		return nil, err
-	} else if buf[0] != cluster.MuxHeader {
+	} else if buf[0] != coordinator.MuxHeader {
 		conn.Close()
 		panic(fmt.Sprintf("unexpected mux header byte: %d", buf[0]))
 	}

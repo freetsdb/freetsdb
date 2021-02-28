@@ -1,3 +1,4 @@
+// Package precreator provides the shard precreation service.
 package precreator // import "github.com/freetsdb/freetsdb/services/precreator"
 
 import (
@@ -24,17 +25,15 @@ type Service struct {
 }
 
 // NewService returns an instance of the precreation service.
-func NewService(c Config) (*Service, error) {
-	s := Service{
+func NewService(c Config) *Service {
+	return &Service{
 		checkInterval: time.Duration(c.CheckInterval),
 		advancePeriod: time.Duration(c.AdvancePeriod),
 		Logger:        zap.NewNop(),
 	}
-
-	return &s, nil
 }
 
-// WithLogger sets the logger on the service.
+// WithLogger sets the logger for the service.
 func (s *Service) WithLogger(log *zap.Logger) {
 	s.Logger = log.With(zap.String("service", "shard-precreation"))
 }
@@ -80,7 +79,7 @@ func (s *Service) runPrecreation() {
 				s.Logger.Info("Failed to precreate shards", zap.Error(err))
 			}
 		case <-s.done:
-			s.Logger.Info("Precreation service terminating")
+			s.Logger.Info("Terminating precreation service")
 			return
 		}
 	}
@@ -89,8 +88,5 @@ func (s *Service) runPrecreation() {
 // precreate performs actual resource precreation.
 func (s *Service) precreate(now time.Time) error {
 	cutoff := now.Add(s.advancePeriod).UTC()
-	if err := s.MetaClient.PrecreateShardGroups(now, cutoff); err != nil {
-		return err
-	}
-	return nil
+	return s.MetaClient.PrecreateShardGroups(now, cutoff)
 }

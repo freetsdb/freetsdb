@@ -5,6 +5,7 @@ import (
 	"net"
 	"time"
 
+	"github.com/freetsdb/freetsdb/monitor/diagnostics"
 	"github.com/freetsdb/freetsdb/toml"
 )
 
@@ -45,8 +46,7 @@ const (
 
 // Config represents the meta configuration.
 type Config struct {
-	Enabled bool   `toml:"enabled"`
-	Dir     string `toml:"dir"`
+	Dir string `toml:"dir"`
 
 	// RemoteHostname is the hostname portion to use when registering meta node
 	// addresses.  This hostname must be resolvable from other nodes.
@@ -76,7 +76,6 @@ type Config struct {
 // NewConfig builds a new configuration with default values.
 func NewConfig() *Config {
 	return &Config{
-		Enabled:              true, // enabled by default
 		BindAddress:          DefaultRaftBindAddress,
 		HTTPBindAddress:      DefaultHTTPBindAddress,
 		RetentionAutoCreate:  true,
@@ -88,13 +87,22 @@ func NewConfig() *Config {
 		LeaseDuration:        toml.Duration(DefaultLeaseDuration),
 		LoggingEnabled:       DefaultLoggingEnabled,
 	}
+
 }
 
+// Validate returns an error if the config is invalid.
 func (c *Config) Validate() error {
 	if c.Dir == "" {
 		return errors.New("Meta.Dir must be specified")
 	}
 	return nil
+}
+
+// Diagnostics returns a diagnostics representation of a subset of the Config.
+func (c *Config) Diagnostics() (*diagnostics.Diagnostics, error) {
+	return diagnostics.RowFromMap(map[string]interface{}{
+		"dir": c.Dir,
+	}), nil
 }
 
 func (c *Config) defaultHost(addr string) string {

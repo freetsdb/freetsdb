@@ -14,9 +14,9 @@ import (
 	"sync"
 	"time"
 
+	"github.com/gogo/protobuf/proto"
 	"github.com/freetsdb/freetsdb/services/meta/internal"
 	"github.com/freetsdb/freetsdb/uuid"
-	"github.com/gogo/protobuf/proto"
 	"github.com/hashicorp/raft"
 	"go.uber.org/zap"
 )
@@ -557,7 +557,7 @@ func gzipFilter(inner http.Handler) http.Handler {
 // and adds the X-INFLUXBD-VERSION header to outgoing responses.
 func versionHeader(inner http.Handler, h *handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Add("X-InfluxDB-Version", h.s.Version)
+		w.Header().Add("X-FreeTSDB-Version", h.s.Version)
 		inner.ServeHTTP(w, r)
 	})
 }

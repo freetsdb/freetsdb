@@ -3,8 +3,8 @@ package main
 import (
 	"collectd.org/api"
 	"collectd.org/network"
-	"context"
 
+	"context"
 	"flag"
 	"fmt"
 	"math/rand"
@@ -33,12 +33,9 @@ func main() {
 
 	go func() {
 		ticker := time.NewTicker(time.Second)
-		for {
-			select {
-			case <-ticker.C:
-				for i := 0; i < *rate; i++ {
-					rateLimiter <- i
-				}
+		for range ticker.C {
+			for i := 0; i < *rate; i++ {
+				rateLimiter <- i
 			}
 		}
 	}()

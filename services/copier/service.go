@@ -89,7 +89,7 @@ func (s *Service) serve() {
 			defer s.wg.Done()
 			defer conn.Close()
 			if err := s.handleConn(conn); err != nil {
-				s.Logger.Info(err.Error())
+				s.Logger.Info("Failed to handleConn", zap.Error(err))
 			}
 		}(conn)
 	}

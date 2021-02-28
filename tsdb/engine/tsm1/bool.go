@@ -5,24 +5,17 @@ package tsm1
 // how many booleans are packed in the slice.  The remaining bytes contains 1 byte for every
 // 8 boolean values encoded.
 
-import "encoding/binary"
-
-const (
-	// booleanUncompressed is an uncompressed boolean format.
-	// Not yet implemented.
-	booleanUncompressed = 0
-
-	// booleanCompressedBitPacked is an bit packed format using 1 bit per boolean
-	booleanCompressedBitPacked = 1
+import (
+	"encoding/binary"
+	"fmt"
 )
 
-// BooleanEncoder encodes a series of booleans to an in-memory buffer.
-type BooleanEncoder interface {
-	Write(b bool)
-	Bytes() ([]byte, error)
-}
+// Note: an uncompressed boolean format is not yet implemented.
+// booleanCompressedBitPacked is a bit packed format using 1 bit per boolean
+const booleanCompressedBitPacked = 1
 
-type booleanEncoder struct {
+// BooleanEncoder encodes a series of booleans to an in-memory buffer.
+type BooleanEncoder struct {
 	// The encoded bytes
 	bytes []byte
 
@@ -37,11 +30,22 @@ type booleanEncoder struct {
 }
 
 // NewBooleanEncoder returns a new instance of BooleanEncoder.
-func NewBooleanEncoder() BooleanEncoder {
-	return &booleanEncoder{}
+func NewBooleanEncoder(sz int) BooleanEncoder {
+	return BooleanEncoder{
+		bytes: make([]byte, 0, (sz+7)/8),
+	}
 }
 
-func (e *booleanEncoder) Write(b bool) {
+// Reset sets the encoder to its initial state.
+func (e *BooleanEncoder) Reset() {
+	e.bytes = e.bytes[:0]
+	e.b = 0
+	e.i = 0
+	e.n = 0
+}
+
+// Write encodes b to the underlying buffer.
+func (e *BooleanEncoder) Write(b bool) {
 	// If we have filled the current byte, flush it
 	if e.i >= 8 {
 		e.flush()
@@ -60,7 +64,7 @@ func (e *booleanEncoder) Write(b bool) {
 	e.n++
 }
 
-func (e *booleanEncoder) flush() {
+func (e *BooleanEncoder) flush() {
 	// Pad remaining byte w/ 0s
 	for e.i < 8 {
 		e.b = e.b << 1
@@ -75,7 +79,11 @@ func (e *booleanEncoder) flush() {
 	}
 }
 
-func (e *booleanEncoder) Bytes() ([]byte, error) {
+// Flush is no-op
+func (e *BooleanEncoder) Flush() {}
+
+// Bytes returns a new byte slice containing the encoded booleans from previous calls to Write.
+func (e *BooleanEncoder) Bytes() ([]byte, error) {
 	// Ensure the current byte is flushed
 	e.flush()
 	b := make([]byte, 10+1)
@@ -92,39 +100,58 @@ func (e *booleanEncoder) Bytes() ([]byte, error) {
 }
 
 // BooleanDecoder decodes a series of booleans from an in-memory buffer.
-type BooleanDecoder interface {
-	Next() bool
-	Read() bool
-	Error() error
-}
-
-type booleanDecoder struct {
+type BooleanDecoder struct {
 	b   []byte
 	i   int
 	n   int
 	err error
 }
 
-// NewBooleanDecoder returns a new instance of BooleanDecoder.
-func NewBooleanDecoder(b []byte) BooleanDecoder {
+// SetBytes initializes the decoder with a new set of bytes to read from.
+// This must be called before calling any other methods.
+func (e *BooleanDecoder) SetBytes(b []byte) {
+	if len(b) == 0 {
+		return
+	}
+
 	// First byte stores the encoding type, only have 1 bit-packet format
 	// currently ignore for now.
 	b = b[1:]
 	count, n := binary.Uvarint(b)
-	return &booleanDecoder{b: b[n:], i: -1, n: int(count)}
+	if n <= 0 {
+		e.err = fmt.Errorf("BooleanDecoder: invalid count")
+		return
+	}
+
+	e.b = b[n:]
+	e.i = -1
+	e.n = int(count)
+
+	if min := len(e.b) * 8; min < e.n {
+		// Shouldn't happen - TSM file was truncated/corrupted
+		e.n = min
+	}
 }
 
-func (e *booleanDecoder) Next() bool {
+// Next returns whether there are any bits remaining in the decoder.
+// It returns false if there was an error decoding.
+// The error is available on the Error method.
+func (e *BooleanDecoder) Next() bool {
+	if e.err != nil {
+		return false
+	}
+
 	e.i++
 	return e.i < e.n
 }
 
-func (e *booleanDecoder) Read() bool {
+// Read returns the next bit from the decoder.
+func (e *BooleanDecoder) Read() bool {
 	// Index into the byte slice
-	idx := e.i / 8
+	idx := e.i >> 3 // integer division by 8
 
 	// Bit position
-	pos := (8 - e.i%8) - 1
+	pos := 7 - (e.i & 0x7)
 
 	// The mask to select the bit
 	mask := byte(1 << uint(pos))
@@ -136,6 +163,7 @@ func (e *booleanDecoder) Read() bool {
 	return v&mask == mask
 }
 
-func (e *booleanDecoder) Error() error {
+// Error returns the error encountered during decoding, if one occurred.
+func (e *BooleanDecoder) Error() error {
 	return e.err
 }

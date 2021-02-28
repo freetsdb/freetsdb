@@ -15,7 +15,7 @@ const (
 )
 
 type Node struct {
-	path  string
+	Path  string
 	ID    uint64
 	Peers []string
 }
@@ -28,7 +28,7 @@ func LoadNode(path string) (*Node, error) {
 	}
 
 	n := &Node{
-		path: path,
+		Path: path,
 	}
 
 	f, err := os.Open(filepath.Join(path, nodeFile))
@@ -47,13 +47,13 @@ func LoadNode(path string) (*Node, error) {
 // NewNode will return a new node
 func NewNode(path string) *Node {
 	return &Node{
-		path: path,
+		Path: path,
 	}
 }
 
 // Save will save the node file to disk and replace the existing one if present
 func (n *Node) Save() error {
-	file := filepath.Join(n.path, nodeFile)
+	file := filepath.Join(n.Path, nodeFile)
 	tmpFile := file + "tmp"
 
 	f, err := os.Create(tmpFile)
@@ -95,10 +95,14 @@ func upgradeNodeFile(path string) error {
 		}
 		return err
 	}
+
 	err = json.Unmarshal(pb, &peers)
+	if err != nil {
+		return err
+	}
 
 	n := &Node{
-		path: path,
+		Path: path,
 	}
 	if n.ID, err = strconv.ParseUint(string(b), 10, 64); err != nil {
 		return err

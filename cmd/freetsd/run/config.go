@@ -1,18 +1,18 @@
 package run
 
 import (
-	"errors"
 	"fmt"
+	"io/ioutil"
 	"os"
 	"os/user"
 	"path/filepath"
-	"reflect"
-	"strconv"
-	"strings"
-	"time"
 
+	"github.com/BurntSushi/toml"
 	"github.com/freetsdb/freetsdb/coordinator"
+	"github.com/freetsdb/freetsdb/logger"
 	"github.com/freetsdb/freetsdb/monitor"
+	"github.com/freetsdb/freetsdb/monitor/diagnostics"
+	"github.com/freetsdb/freetsdb/pkg/tlsconfig"
 	"github.com/freetsdb/freetsdb/services/collectd"
 	"github.com/freetsdb/freetsdb/services/continuous_querier"
 	"github.com/freetsdb/freetsdb/services/graphite"
@@ -23,11 +23,14 @@ import (
 	"github.com/freetsdb/freetsdb/services/retention"
 	"github.com/freetsdb/freetsdb/services/subscriber"
 	"github.com/freetsdb/freetsdb/services/udp"
+	itoml "github.com/freetsdb/freetsdb/toml"
 	"github.com/freetsdb/freetsdb/tsdb"
+	"golang.org/x/text/encoding/unicode"
+	"golang.org/x/text/transform"
 )
 
 const (
-	// DefaultBindAddress is the default address for raft, cluster, snapshot, etc..
+	// DefaultBindAddress is the default address for raft, snapshot, etc..
 	DefaultBindAddress = ":8088"
 
 	// DefaultHostname is the default hostname used if we are unable to determine
@@ -42,13 +45,14 @@ type Config struct {
 	Retention   retention.Config   `toml:"retention"`
 	Precreator  precreator.Config  `toml:"shard-precreation"`
 
-	Monitor    monitor.Config    `toml:"monitor"`
-	Subscriber subscriber.Config `toml:"subscriber"`
-	HTTPD      httpd.Config      `toml:"http"`
-	Graphites  []graphite.Config `toml:"graphite"`
-	Collectd   collectd.Config   `toml:"collectd"`
-	OpenTSDB   opentsdb.Config   `toml:"opentsdb"`
-	UDPs       []udp.Config      `toml:"udp"`
+	Monitor        monitor.Config    `toml:"monitor"`
+	Subscriber     subscriber.Config `toml:"subscriber"`
+	HTTPD          httpd.Config      `toml:"http"`
+	Logging        logger.Config     `toml:"logging"`
+	GraphiteInputs []graphite.Config `toml:"graphite"`
+	CollectdInputs []collectd.Config `toml:"collectd"`
+	OpenTSDBInputs []opentsdb.Config `toml:"opentsdb"`
+	UDPInputs      []udp.Config      `toml:"udp"`
 
 	ContinuousQuery continuous_querier.Config `toml:"continuous_queries"`
 	HintedHandoff   hh.Config                 `toml:"hinted-handoff"`
@@ -56,12 +60,15 @@ type Config struct {
 	// Server reporting
 	ReportingDisabled bool `toml:"reporting-disabled"`
 
-	// BindAddress is the address that all TCP services use (Raft, Snapshot, Coordinator, etc.)
+	// BindAddress is the address that all TCP services use (Raft, Snapshot, etc.)
 	BindAddress string `toml:"bind-address"`
 
 	// Hostname is the hostname portion to use when registering local
 	// addresses.  This hostname must be resolvable from other nodes.
 	Hostname string `toml:"hostname"`
+
+	// TLS provides configuration options for all https endpoints.
+	TLS tlsconfig.Config `toml:"tls"`
 }
 
 // NewConfig returns an instance of Config with reasonable defaults.
@@ -74,38 +81,23 @@ func NewConfig() *Config {
 	c.Monitor = monitor.NewConfig()
 	c.Subscriber = subscriber.NewConfig()
 	c.HTTPD = httpd.NewConfig()
-	c.Collectd = collectd.NewConfig()
-	c.OpenTSDB = opentsdb.NewConfig()
+	c.Logging = logger.NewConfig()
+
+	c.GraphiteInputs = []graphite.Config{graphite.NewConfig()}
+	c.CollectdInputs = []collectd.Config{collectd.NewConfig()}
+	c.OpenTSDBInputs = []opentsdb.Config{opentsdb.NewConfig()}
+	c.UDPInputs = []udp.Config{udp.NewConfig()}
 
 	c.ContinuousQuery = continuous_querier.NewConfig()
 	c.Retention = retention.NewConfig()
-	c.HintedHandoff = hh.NewConfig()
 	c.BindAddress = DefaultBindAddress
 
-	// All ARRAY attributes have to be init after toml decode
-	// See: https://github.com/BurntSushi/toml/pull/68
-	// Those attributes will be initialized in Config.InitTableAttrs method
-	// Concerned Attributes:
-	//  * `c.Graphites`
-	//  * `c.UDPs`
-
 	return c
-}
-
-// InitTableAttrs initialises all ARRAY attributes if empty
-func (c *Config) InitTableAttrs() {
-	if len(c.UDPs) == 0 {
-		c.UDPs = []udp.Config{udp.NewConfig()}
-	}
-	if len(c.Graphites) == 0 {
-		c.Graphites = []graphite.Config{graphite.NewConfig()}
-	}
 }
 
 // NewDemoConfig returns the config that runs when no config is specified.
 func NewDemoConfig() (*Config, error) {
 	c := NewConfig()
-	c.InitTableAttrs()
 
 	var homeDir string
 	// By default, store meta and data files in current users home directory
@@ -119,141 +111,140 @@ func NewDemoConfig() (*Config, error) {
 	}
 
 	c.Data.Dir = filepath.Join(homeDir, ".freetsdb/data")
-	c.HintedHandoff.Dir = filepath.Join(homeDir, ".freetsdb/hh")
 	c.Data.WALDir = filepath.Join(homeDir, ".freetsdb/wal")
-
-	c.HintedHandoff.Enabled = true
 
 	return c, nil
 }
 
-// Validate returns an error if the config is invalid.
-func (c *Config) Validate() error {
-	if !c.Data.Enabled {
-		return errors.New("Data must be enabled")
+// FromTomlFile loads the config from a TOML file.
+func (c *Config) FromTomlFile(fpath string) error {
+	bs, err := ioutil.ReadFile(fpath)
+	if err != nil {
+		return err
 	}
 
-	if c.Data.Enabled {
-		if err := c.Data.Validate(); err != nil {
-			return err
-		}
+	// Handle any potential Byte-Order-Marks that may be in the config file.
+	// This is for Windows compatibility only.
+	bom := unicode.BOMOverride(transform.Nop)
+	bs, _, err = transform.Bytes(bom, bs)
+	if err != nil {
+		return err
+	}
+	return c.FromToml(string(bs))
+}
 
-		if err := c.HintedHandoff.Validate(); err != nil {
-			return err
+// FromToml loads the config from TOML.
+func (c *Config) FromToml(input string) error {
+	_, err := toml.Decode(input, c)
+	return err
+}
+
+// Validate returns an error if the config is invalid.
+func (c *Config) Validate() error {
+
+	if err := c.Data.Validate(); err != nil {
+		return err
+	}
+
+	//if err := c.HintedHandoff.Validate(); err != nil {
+	//	return err
+	//}
+	for _, graphite := range c.GraphiteInputs {
+		if err := graphite.Validate(); err != nil {
+			return fmt.Errorf("invalid graphite config: %v", err)
 		}
-		for _, g := range c.Graphites {
-			if err := g.Validate(); err != nil {
-				return fmt.Errorf("invalid graphite config: %v", err)
-			}
+	}
+
+	if err := c.Monitor.Validate(); err != nil {
+		return err
+	}
+
+	if err := c.ContinuousQuery.Validate(); err != nil {
+		return err
+	}
+
+	if err := c.Retention.Validate(); err != nil {
+		return err
+	}
+
+	if err := c.Precreator.Validate(); err != nil {
+		return err
+	}
+
+	if err := c.Subscriber.Validate(); err != nil {
+		return err
+	}
+
+	for _, collectd := range c.CollectdInputs {
+		if err := collectd.Validate(); err != nil {
+			return fmt.Errorf("invalid collectd config: %v", err)
 		}
+	}
+
+	if err := c.TLS.Validate(); err != nil {
+		return err
 	}
 
 	return nil
 }
 
 // ApplyEnvOverrides apply the environment configuration on top of the config.
-func (c *Config) ApplyEnvOverrides() error {
-	return c.applyEnvOverrides("INFLUXDB", reflect.ValueOf(c))
+func (c *Config) ApplyEnvOverrides(getenv func(string) string) error {
+	return itoml.ApplyEnvOverrides(getenv, "FREETSDB", c)
 }
 
-func (c *Config) applyEnvOverrides(prefix string, spec reflect.Value) error {
-	// If we have a pointer, dereference it
-	s := spec
-	if spec.Kind() == reflect.Ptr {
-		s = spec.Elem()
+// Diagnostics returns a diagnostics representation of Config.
+func (c *Config) Diagnostics() (*diagnostics.Diagnostics, error) {
+	return diagnostics.RowFromMap(map[string]interface{}{
+		"reporting-disabled": c.ReportingDisabled,
+		"bind-address":       c.BindAddress,
+	}), nil
+}
+
+func (c *Config) diagnosticsClients() map[string]diagnostics.Client {
+	// Config settings that are always present.
+	m := map[string]diagnostics.Client{
+		"config": c,
+
+		"config-data":        c.Data,
+		"config-coordinator": c.Coordinator,
+		"config-retention":   c.Retention,
+		"config-precreator":  c.Precreator,
+
+		"config-monitor":    c.Monitor,
+		"config-subscriber": c.Subscriber,
+		"config-httpd":      c.HTTPD,
+
+		"config-cqs": c.ContinuousQuery,
 	}
 
-	// Make sure we have struct
-	if s.Kind() != reflect.Struct {
-		return nil
+	// Config settings that can be repeated and can be disabled.
+	if g := graphite.Configs(c.GraphiteInputs); g.Enabled() {
+		m["config-graphite"] = g
+	}
+	if cc := collectd.Configs(c.CollectdInputs); cc.Enabled() {
+		m["config-collectd"] = cc
+	}
+	if t := opentsdb.Configs(c.OpenTSDBInputs); t.Enabled() {
+		m["config-opentsdb"] = t
+	}
+	if u := udp.Configs(c.UDPInputs); u.Enabled() {
+		m["config-udp"] = u
 	}
 
-	typeOfSpec := s.Type()
-	for i := 0; i < s.NumField(); i++ {
-		f := s.Field(i)
-		// Get the toml tag to determine what env var name to use
-		configName := typeOfSpec.Field(i).Tag.Get("toml")
-		// Replace hyphens with underscores to avoid issues with shells
-		configName = strings.Replace(configName, "-", "_", -1)
-		fieldKey := typeOfSpec.Field(i).Name
+	return m
+}
 
-		// Skip any fields that we cannot set
-		if f.CanSet() || f.Kind() == reflect.Slice {
-
-			// Use the upper-case prefix and toml name for the env var
-			key := strings.ToUpper(configName)
-			if prefix != "" {
-				key = strings.ToUpper(fmt.Sprintf("%s_%s", prefix, configName))
-			}
-			value := os.Getenv(key)
-
-			// If the type is s slice, apply to each using the index as a suffix
-			// e.g. GRAPHITE_0
-			if f.Kind() == reflect.Slice || f.Kind() == reflect.Array {
-				for i := 0; i < f.Len(); i++ {
-					if err := c.applyEnvOverrides(fmt.Sprintf("%s_%d", key, i), f.Index(i)); err != nil {
-						return err
-					}
-				}
-				continue
-			}
-
-			// If it's a sub-config, recursively apply
-			if f.Kind() == reflect.Struct || f.Kind() == reflect.Ptr {
-				if err := c.applyEnvOverrides(key, f); err != nil {
-					return err
-				}
-				continue
-			}
-
-			// Skip any fields we don't have a value to set
-			if value == "" {
-				continue
-			}
-
-			switch f.Kind() {
-			case reflect.String:
-				f.SetString(value)
-			case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
-
-				var intValue int64
-
-				// Handle toml.Duration
-				if f.Type().Name() == "Duration" {
-					dur, err := time.ParseDuration(value)
-					if err != nil {
-						return fmt.Errorf("failed to apply %v to %v using type %v and value '%v'", key, fieldKey, f.Type().String(), value)
-					}
-					intValue = dur.Nanoseconds()
-				} else {
-					var err error
-					intValue, err = strconv.ParseInt(value, 0, f.Type().Bits())
-					if err != nil {
-						return fmt.Errorf("failed to apply %v to %v using type %v and value '%v'", key, fieldKey, f.Type().String(), value)
-					}
-				}
-
-				f.SetInt(intValue)
-			case reflect.Bool:
-				boolValue, err := strconv.ParseBool(value)
-				if err != nil {
-					return fmt.Errorf("failed to apply %v to %v using type %v and value '%v'", key, fieldKey, f.Type().String(), value)
-
-				}
-				f.SetBool(boolValue)
-			case reflect.Float32, reflect.Float64:
-				floatValue, err := strconv.ParseFloat(value, f.Type().Bits())
-				if err != nil {
-					return fmt.Errorf("failed to apply %v to %v using type %v and value '%v'", key, fieldKey, f.Type().String(), value)
-
-				}
-				f.SetFloat(floatValue)
-			default:
-				if err := c.applyEnvOverrides(key, f); err != nil {
-					return err
-				}
-			}
-		}
+// registerDiagnostics registers the config settings with the Monitor.
+func (c *Config) registerDiagnostics(m *monitor.Monitor) {
+	for name, dc := range c.diagnosticsClients() {
+		m.RegisterDiagnosticsClient(name, dc)
 	}
-	return nil
+}
+
+// registerDiagnostics deregisters the config settings from the Monitor.
+func (c *Config) deregisterDiagnostics(m *monitor.Monitor) {
+	for name := range c.diagnosticsClients() {
+		m.DeregisterDiagnosticsClient(name)
+	}
 }

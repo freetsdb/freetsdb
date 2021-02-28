@@ -1,39 +1,59 @@
+// Package restore is the restore subcommand for the freetsd-ctl command,
+// for restoring from a backup.
 package restore
 
 import (
 	"archive/tar"
 	"bytes"
 	"encoding/binary"
-	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"io/ioutil"
-	"net"
+	"log"
 	"os"
 	"path/filepath"
 	"strconv"
-	"sync"
+	"strings"
 
-	"github.com/freetsdb/freetsdb/cmd/freetsd-ctl/backup"
+	gzip "github.com/klauspost/pgzip"
+
+	"github.com/freetsdb/freetsdb/cmd/freetsd-ctl/backup_util"
+	tarstream "github.com/freetsdb/freetsdb/pkg/tar"
 	"github.com/freetsdb/freetsdb/services/meta"
 	"github.com/freetsdb/freetsdb/services/snapshotter"
 )
 
-// Command represents the program execution for "freetsd restore".
+// Command represents the program execution for "freetsd-ctl restore".
 type Command struct {
-	Stdout io.Writer
-	Stderr io.Writer
+	// The logger passed to the ticker during execution.
+	StdoutLogger *log.Logger
+	StderrLogger *log.Logger
 
-	backupFilesPath string
-	metadir         string
-	datadir         string
-	database        string
-	retention       string
-	shard           string
+	// Standard input/output, overridden for testing.
+	Stderr io.Writer
+	Stdout io.Writer
+
+	host   string
+	client *snapshotter.Client
+
+	backupFilesPath     string
+	metadir             string
+	datadir             string
+	destinationDatabase string
+	sourceDatabase      string
+	backupRetention     string
+	restoreRetention    string
+	shard               uint64
+	portable            bool
+	online              bool
+	manifestMeta        *backup_util.MetaEntry
+	manifestFiles       map[uint64]*backup_util.Entry
 
 	// TODO: when the new meta stuff is done this should not be exported or be gone
 	MetaConfig *meta.Config
+
+	shardIDMap map[uint64]uint64
 }
 
 // NewCommand returns a new instance of Command with default settings.
@@ -47,24 +67,32 @@ func NewCommand() *Command {
 
 // Run executes the program.
 func (cmd *Command) Run(args ...string) error {
+	// Set up logger.
+	cmd.StdoutLogger = log.New(cmd.Stdout, "", log.LstdFlags)
+	cmd.StderrLogger = log.New(cmd.Stderr, "", log.LstdFlags)
 	if err := cmd.parseFlags(args); err != nil {
 		return err
 	}
 
-	if err := cmd.ensureStopped(); err != nil {
-		fmt.Fprintln(cmd.Stderr, "freetsd cannot be running during a restore.  Please stop any running instances and try again.")
-		return err
+	if cmd.portable {
+		return cmd.runOnlinePortable()
+	} else if cmd.online {
+		return cmd.runOnlineLegacy()
+	} else {
+		return cmd.runOffline()
 	}
+}
 
+func (cmd *Command) runOffline() error {
 	if cmd.metadir != "" {
 		if err := cmd.unpackMeta(); err != nil {
 			return err
 		}
 	}
 
-	if cmd.shard != "" {
+	if cmd.shard != 0 {
 		return cmd.unpackShard(cmd.shard)
-	} else if cmd.retention != "" {
+	} else if cmd.restoreRetention != "" {
 		return cmd.unpackRetention()
 	} else if cmd.datadir != "" {
 		return cmd.unpackDatabase()
@@ -72,14 +100,52 @@ func (cmd *Command) Run(args ...string) error {
 	return nil
 }
 
+func (cmd *Command) runOnlinePortable() error {
+	err := cmd.updateMetaPortable()
+	if err != nil {
+		cmd.StderrLogger.Printf("error updating meta: %v", err)
+		return err
+	}
+	err = cmd.uploadShardsPortable()
+	if err != nil {
+		cmd.StderrLogger.Printf("error updating shards: %v", err)
+		return err
+	}
+	return nil
+}
+
+func (cmd *Command) runOnlineLegacy() error {
+	err := cmd.updateMetaLegacy()
+	if err != nil {
+		cmd.StderrLogger.Printf("error updating meta: %v", err)
+		return err
+	}
+	err = cmd.uploadShardsLegacy()
+	if err != nil {
+		cmd.StderrLogger.Printf("error updating shards: %v", err)
+		return err
+	}
+	return nil
+}
+
 // parseFlags parses and validates the command line arguments.
 func (cmd *Command) parseFlags(args []string) error {
 	fs := flag.NewFlagSet("", flag.ContinueOnError)
+	fs.StringVar(&cmd.host, "host", "localhost:8088", "")
 	fs.StringVar(&cmd.metadir, "metadir", "", "")
 	fs.StringVar(&cmd.datadir, "datadir", "", "")
-	fs.StringVar(&cmd.database, "database", "", "")
-	fs.StringVar(&cmd.retention, "retention", "", "")
-	fs.StringVar(&cmd.shard, "shard", "", "")
+
+	fs.StringVar(&cmd.sourceDatabase, "database", "", "")
+	fs.StringVar(&cmd.sourceDatabase, "db", "", "")
+	fs.StringVar(&cmd.destinationDatabase, "newdb", "", "")
+
+	fs.StringVar(&cmd.backupRetention, "retention", "", "")
+	fs.StringVar(&cmd.backupRetention, "rp", "", "")
+	fs.StringVar(&cmd.restoreRetention, "newrp", "", "")
+
+	fs.Uint64Var(&cmd.shard, "shard", 0, "")
+	fs.BoolVar(&cmd.online, "online", false, "")
+	fs.BoolVar(&cmd.portable, "portable", false, "")
 	fs.SetOutput(cmd.Stdout)
 	fs.Usage = cmd.printUsage
 	if err := fs.Parse(args); err != nil {
@@ -88,6 +154,7 @@ func (cmd *Command) parseFlags(args []string) error {
 
 	cmd.MetaConfig = meta.NewConfig()
 	cmd.MetaConfig.Dir = cmd.metadir
+	cmd.client = snapshotter.NewClient(cmd.host)
 
 	// Require output path.
 	cmd.backupFilesPath = fs.Arg(0)
@@ -95,35 +162,59 @@ func (cmd *Command) parseFlags(args []string) error {
 		return fmt.Errorf("path with backup files required")
 	}
 
-	// validate the arguments
-	if cmd.metadir == "" && cmd.database == "" {
-		return fmt.Errorf("-metadir or -database are required to restore")
+	fi, err := os.Stat(cmd.backupFilesPath)
+	if err != nil || !fi.IsDir() {
+		return fmt.Errorf("backup path should be a valid directory: %s", cmd.backupFilesPath)
 	}
 
-	if cmd.database != "" && cmd.datadir == "" {
-		return fmt.Errorf("-datadir is required to restore")
-	}
+	if cmd.portable || cmd.online {
+		// validate the arguments
 
-	if cmd.shard != "" {
-		if cmd.database == "" {
-			return fmt.Errorf("-database is required to restore shard")
+		if cmd.metadir != "" {
+			return fmt.Errorf("offline parameter metadir found, not compatible with -portable")
 		}
-		if cmd.retention == "" {
-			return fmt.Errorf("-retention is required to restore shard")
+
+		if cmd.datadir != "" {
+			return fmt.Errorf("offline parameter datadir found, not compatible with -portable")
 		}
-	} else if cmd.retention != "" && cmd.database == "" {
-		return fmt.Errorf("-database is required to restore retention policy")
+
+		if cmd.restoreRetention == "" {
+			cmd.restoreRetention = cmd.backupRetention
+		}
+
+		if cmd.portable {
+			var err error
+			cmd.manifestMeta, cmd.manifestFiles, err = backup_util.LoadIncremental(cmd.backupFilesPath)
+			if err != nil {
+				return fmt.Errorf("restore failed while processing manifest files: %s", err.Error())
+			} else if cmd.manifestMeta == nil {
+				// No manifest files found.
+				return fmt.Errorf("No manifest files found in: %s\n", cmd.backupFilesPath)
+
+			}
+		}
+	} else {
+		// validate the arguments
+		if cmd.metadir == "" && cmd.destinationDatabase == "" {
+			return fmt.Errorf("-metadir or -destinationDatabase are required to restore")
+		}
+
+		if cmd.destinationDatabase != "" && cmd.datadir == "" {
+			return fmt.Errorf("-datadir is required to restore")
+		}
+
+		if cmd.shard != 0 {
+			if cmd.destinationDatabase == "" {
+				return fmt.Errorf("-destinationDatabase is required to restore shard")
+			}
+			if cmd.backupRetention == "" {
+				return fmt.Errorf("-retention is required to restore shard")
+			}
+		} else if cmd.backupRetention != "" && cmd.destinationDatabase == "" {
+			return fmt.Errorf("-destinationDatabase is required to restore retention policy")
+		}
 	}
 
-	return nil
-}
-
-func (cmd *Command) ensureStopped() error {
-	ln, err := net.Listen("tcp", cmd.MetaConfig.BindAddress)
-	if err != nil {
-		return fmt.Errorf("freetsd running on %s: aborting", cmd.MetaConfig.BindAddress)
-	}
-	defer ln.Close()
 	return nil
 }
 
@@ -131,7 +222,7 @@ func (cmd *Command) ensureStopped() error {
 // cluster and replaces the root metadata.
 func (cmd *Command) unpackMeta() error {
 	// find the meta file
-	metaFiles, err := filepath.Glob(filepath.Join(cmd.backupFilesPath, backup.Metafile+".*"))
+	metaFiles, err := filepath.Glob(filepath.Join(cmd.backupFilesPath, backup_util.Metafile+".*"))
 	if err != nil {
 		return err
 	}
@@ -173,7 +264,7 @@ func (cmd *Command) unpackMeta() error {
 	// Size of the node.json bytes
 	length = int(binary.BigEndian.Uint64(b[i : i+8]))
 	i += 8
-	nodeBytes := b[i:]
+	nodeBytes := b[i : i+length]
 
 	// Unpack into metadata.
 	var data meta.Data
@@ -183,10 +274,10 @@ func (cmd *Command) unpackMeta() error {
 
 	// Copy meta config and remove peers so it starts in single mode.
 	c := cmd.MetaConfig
-	c.LoggingEnabled = false
+	c.Dir = cmd.metadir
 
 	// Create the meta dir
-	if os.MkdirAll(c.Dir, 0700); err != nil {
+	if err := os.MkdirAll(c.Dir, 0700); err != nil {
 		return err
 	}
 
@@ -195,27 +286,7 @@ func (cmd *Command) unpackMeta() error {
 		return err
 	}
 
-	// Initialize meta store.
-	store := meta.NewService(c)
-	store.RaftListener = newNopListener()
-
-	// Open the meta store.
-	if err := store.Open(); err != nil {
-		return fmt.Errorf("open store: %s", err)
-	}
-	defer store.Close()
-
-	// Wait for the store to be ready or error.
-	select {
-	case err := <-store.Err():
-		return err
-	default:
-	}
-
 	client := meta.NewClient(nil)
-	client.SetMetaServers([]string{store.HTTPAddr()})
-	client.SetTLS(false)
-
 	if err := client.Open(); err != nil {
 		return err
 	}
@@ -225,14 +296,216 @@ func (cmd *Command) unpackMeta() error {
 	if err := client.SetData(&data); err != nil {
 		return fmt.Errorf("set data: %s", err)
 	}
+
+	// remove the raft.db file if it exists
+	err = os.Remove(filepath.Join(cmd.metadir, "raft.db"))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+
+	// remove the node.json file if it exists
+	err = os.Remove(filepath.Join(cmd.metadir, "node.json"))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+
 	return nil
+}
+
+func (cmd *Command) updateMetaPortable() error {
+	var metaBytes []byte
+	fileName := filepath.Join(cmd.backupFilesPath, cmd.manifestMeta.FileName)
+
+	fileBytes, err := ioutil.ReadFile(fileName)
+	if err != nil {
+		return err
+	}
+
+	var ep backup_util.PortablePacker
+	ep.UnmarshalBinary(fileBytes)
+
+	metaBytes = ep.Data
+
+	req := &snapshotter.Request{
+		Type:                   snapshotter.RequestMetaStoreUpdate,
+		BackupDatabase:         cmd.sourceDatabase,
+		RestoreDatabase:        cmd.destinationDatabase,
+		BackupRetentionPolicy:  cmd.backupRetention,
+		RestoreRetentionPolicy: cmd.restoreRetention,
+		UploadSize:             int64(len(metaBytes)),
+	}
+
+	shardIDMap, err := cmd.client.UpdateMeta(req, bytes.NewReader(metaBytes))
+	cmd.shardIDMap = shardIDMap
+	return err
+
+}
+
+// updateMetaLive takes a metadata backup and sends it to the freetsd-ctl server
+// for a live merger of metadata.
+func (cmd *Command) updateMetaLegacy() error {
+
+	var metaBytes []byte
+
+	// find the meta file
+	metaFiles, err := filepath.Glob(filepath.Join(cmd.backupFilesPath, backup_util.Metafile+".*"))
+	if err != nil {
+		return err
+	}
+
+	if len(metaFiles) == 0 {
+		return fmt.Errorf("no metastore backups in %s", cmd.backupFilesPath)
+	}
+
+	fileName := metaFiles[len(metaFiles)-1]
+	cmd.StdoutLogger.Printf("Using metastore snapshot: %v\n", fileName)
+	metaBytes, err = backup_util.GetMetaBytes(fileName)
+	if err != nil {
+		return err
+	}
+
+	req := &snapshotter.Request{
+		Type:                   snapshotter.RequestMetaStoreUpdate,
+		BackupDatabase:         cmd.sourceDatabase,
+		RestoreDatabase:        cmd.destinationDatabase,
+		BackupRetentionPolicy:  cmd.backupRetention,
+		RestoreRetentionPolicy: cmd.restoreRetention,
+		UploadSize:             int64(len(metaBytes)),
+	}
+
+	shardIDMap, err := cmd.client.UpdateMeta(req, bytes.NewReader(metaBytes))
+	cmd.shardIDMap = shardIDMap
+	return err
+}
+
+func (cmd *Command) uploadShardsPortable() error {
+	for _, file := range cmd.manifestFiles {
+		if cmd.sourceDatabase == "" || cmd.sourceDatabase == file.Database {
+			if cmd.backupRetention == "" || cmd.backupRetention == file.Policy {
+				if cmd.shard == 0 || cmd.shard == file.ShardID {
+					oldID := file.ShardID
+					// if newID not found then this shard's metadata was NOT imported
+					// and should be skipped
+					newID, ok := cmd.shardIDMap[oldID]
+					if !ok {
+						cmd.StdoutLogger.Printf("Meta info not found for shard %d on database %s. Skipping shard file %s", oldID, file.Database, file.FileName)
+						continue
+					}
+					cmd.StdoutLogger.Printf("Restoring shard %d live from backup %s\n", file.ShardID, file.FileName)
+					f, err := os.Open(filepath.Join(cmd.backupFilesPath, file.FileName))
+					if err != nil {
+						f.Close()
+						return err
+					}
+					gr, err := gzip.NewReader(f)
+					if err != nil {
+						f.Close()
+						return err
+					}
+					tr := tar.NewReader(gr)
+					targetDB := cmd.destinationDatabase
+					if targetDB == "" {
+						targetDB = file.Database
+					}
+
+					if err := cmd.client.UploadShard(oldID, newID, targetDB, cmd.restoreRetention, tr); err != nil {
+						f.Close()
+						return err
+					}
+					f.Close()
+				}
+			}
+		}
+	}
+	return nil
+}
+
+// unpackFiles will look for backup files matching the pattern and restore them to the data dir
+func (cmd *Command) uploadShardsLegacy() error {
+	// find the destinationDatabase backup files
+	pat := fmt.Sprintf("%s.*", filepath.Join(cmd.backupFilesPath, cmd.sourceDatabase))
+	cmd.StdoutLogger.Printf("Restoring live from backup %s\n", pat)
+	backupFiles, err := filepath.Glob(pat)
+	if err != nil {
+		return err
+	}
+	if len(backupFiles) == 0 {
+		return fmt.Errorf("no backup files in %s", cmd.backupFilesPath)
+	}
+
+	for _, fn := range backupFiles {
+		parts := strings.Split(filepath.Base(fn), ".")
+
+		if len(parts) != 4 {
+			cmd.StderrLogger.Printf("Skipping mis-named backup file: %s", fn)
+		}
+		shardID, err := strconv.ParseUint(parts[2], 10, 64)
+		if err != nil {
+			return err
+		}
+
+		// if newID not found then this shard's metadata was NOT imported
+		// and should be skipped
+		newID, ok := cmd.shardIDMap[shardID]
+		if !ok {
+			cmd.StdoutLogger.Printf("Meta info not found for shard %d. Skipping shard file %s", shardID, fn)
+			continue
+		}
+		f, err := os.Open(fn)
+		if err != nil {
+			return err
+		}
+		tr := tar.NewReader(f)
+		if err := cmd.client.UploadShard(shardID, newID, cmd.destinationDatabase, cmd.restoreRetention, tr); err != nil {
+			f.Close()
+			return err
+		}
+		f.Close()
+	}
+
+	return nil
+}
+
+// unpackDatabase will look for all backup files in the path matching this destinationDatabase
+// and restore them to the data dir
+func (cmd *Command) unpackDatabase() error {
+	// make sure the shard isn't already there so we don't clobber anything
+	restorePath := filepath.Join(cmd.datadir, cmd.sourceDatabase)
+	if _, err := os.Stat(restorePath); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("database already present: %s", restorePath)
+	}
+
+	// find the database backup files
+	pat := filepath.Join(cmd.backupFilesPath, cmd.sourceDatabase)
+	return cmd.unpackFiles(pat + ".*")
+}
+
+// unpackRetention will look for all backup files in the path matching this retention
+// and restore them to the data dir
+func (cmd *Command) unpackRetention() error {
+	// make sure the shard isn't already there so we don't clobber anything
+	restorePath := filepath.Join(cmd.datadir, cmd.sourceDatabase, cmd.backupRetention)
+	if _, err := os.Stat(restorePath); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("retention already present: %s", restorePath)
+	}
+
+	// find the retention backup files
+	pat := filepath.Join(cmd.backupFilesPath, cmd.sourceDatabase)
+	return cmd.unpackFiles(fmt.Sprintf("%s.%s.*", pat, cmd.backupRetention))
 }
 
 // unpackShard will look for all backup files in the path matching this shard ID
 // and restore them to the data dir
-func (cmd *Command) unpackShard(shardID string) error {
+func (cmd *Command) unpackShard(shard uint64) error {
+	shardID := strconv.FormatUint(shard, 10)
 	// make sure the shard isn't already there so we don't clobber anything
-	restorePath := filepath.Join(cmd.datadir, cmd.database, cmd.retention, shardID)
+	restorePath := filepath.Join(cmd.datadir, cmd.sourceDatabase, cmd.backupRetention, shardID)
 	if _, err := os.Stat(restorePath); err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("shard already present: %s", restorePath)
 	}
@@ -243,41 +516,13 @@ func (cmd *Command) unpackShard(shardID string) error {
 	}
 
 	// find the shard backup files
-	pat := filepath.Join(cmd.backupFilesPath, fmt.Sprintf(backup.BackupFilePattern, cmd.database, cmd.retention, id))
+	pat := filepath.Join(cmd.backupFilesPath, fmt.Sprintf(backup_util.BackupFilePattern, cmd.sourceDatabase, cmd.backupRetention, id))
 	return cmd.unpackFiles(pat + ".*")
-}
-
-// unpackDatabase will look for all backup files in the path matching this database
-// and restore them to the data dir
-func (cmd *Command) unpackDatabase() error {
-	// make sure the shard isn't already there so we don't clobber anything
-	restorePath := filepath.Join(cmd.datadir, cmd.database)
-	if _, err := os.Stat(restorePath); err != nil && !os.IsNotExist(err) {
-		return fmt.Errorf("database already present: %s", restorePath)
-	}
-
-	// find the database backup files
-	pat := filepath.Join(cmd.backupFilesPath, cmd.database)
-	return cmd.unpackFiles(pat + ".*")
-}
-
-// unpackRetention will look for all backup files in the path matching this retention
-// and restore them to the data dir
-func (cmd *Command) unpackRetention() error {
-	// make sure the shard isn't already there so we don't clobber anything
-	restorePath := filepath.Join(cmd.datadir, cmd.database, cmd.retention)
-	if _, err := os.Stat(restorePath); err != nil && !os.IsNotExist(err) {
-		return fmt.Errorf("retention already present: %s", restorePath)
-	}
-
-	// find the retention backup files
-	pat := filepath.Join(cmd.backupFilesPath, cmd.database)
-	return cmd.unpackFiles(fmt.Sprintf("%s.%s.*", pat, cmd.retention))
 }
 
 // unpackFiles will look for backup files matching the pattern and restore them to the data dir
 func (cmd *Command) unpackFiles(pat string) error {
-	fmt.Printf("Restoring from backup %s\n", pat)
+	cmd.StdoutLogger.Printf("Restoring offline from backup %s\n", pat)
 
 	backupFiles, err := filepath.Glob(pat)
 	if err != nil {
@@ -305,97 +550,51 @@ func (cmd *Command) unpackTar(tarFile string) error {
 	}
 	defer f.Close()
 
-	tr := tar.NewReader(f)
-
-	for {
-		hdr, err := tr.Next()
-		if err == io.EOF {
-			return nil
-		} else if err != nil {
-			return err
-		}
-
-		if err := cmd.unpackFile(tr, hdr.Name); err != nil {
-			return err
-		}
-	}
-}
-
-// unpackFile will copy the current file from the tar archive to the data dir
-func (cmd *Command) unpackFile(tr *tar.Reader, fileName string) error {
-	fn := filepath.Join(cmd.datadir, fileName)
-	fmt.Printf("unpacking %s\n", fn)
-
-	if err := os.MkdirAll(filepath.Dir(fn), 0777); err != nil {
-		return fmt.Errorf("error making restore dir: %s", err.Error())
+	// should get us ["db","rp", "00001", "00"]
+	pathParts := strings.Split(filepath.Base(tarFile), ".")
+	if len(pathParts) != 4 {
+		return fmt.Errorf("backup tarfile name incorrect format")
 	}
 
-	ff, err := os.Create(fn)
-	if err != nil {
-		return err
-	}
-	defer ff.Close()
+	shardPath := filepath.Join(cmd.datadir, pathParts[0], pathParts[1], strings.Trim(pathParts[2], "0"))
+	os.MkdirAll(shardPath, 0755)
 
-	if _, err := io.Copy(ff, tr); err != nil {
-		return err
-	}
-
-	return nil
+	return tarstream.Restore(f, shardPath)
 }
 
 // printUsage prints the usage message to STDERR.
 func (cmd *Command) printUsage() {
-	fmt.Fprintf(cmd.Stdout, `usage: freetsd restore [flags] PATH
+	fmt.Fprintf(cmd.Stdout, `
+Uses backup copies from the specified PATH to restore databases or specific shards from FreeTSDB 
+  to an FreeTSDB instance.
 
-Restore uses backups from the PATH to restore the metastore, databases,
-retention policies, or specific shards. The FreeTSDB process must not be
-running during restore.
+Usage: freetsd-ctl restore -portable [options] PATH
+
+Note: Restore using the '-portable' option consumes files in an improved Enterprise-compatible 
+  format that includes a file manifest.
 
 Options:
-  -metadir <path>
-        Optional. If set the metastore will be recovered to the given path.
-  -datadir <path>
-        Optional. If set the restore process will recover the specified
-        database, retention policy or shard to the given directory.
-  -database <name>
-        Optional. Required if no metadir given. Will restore the database
-        TSM files.
-  -retention <name>
-        Optional. If given, database is required. Will restore the retention policy's
-        TSM files.
-  -shard <id>
-    Optional. If given, database and retention are required. Will restore the shard's
-    TSM files.
+    -portable 
+            Required to activate the portable restore mode. If not specified, the legacy restore mode is used.
+    -host  <host:port>
+            FreeTSDB host to connect to where the data will be restored. Defaults to '127.0.0.1:8088'.
+    -db    <name>
+            Name of database to be restored from the backup
+    -newdb <name>
+            Name of the FreeTSDB database into which the archived data will be imported on the target system. 
+            Optional. If not given, then the value of '-db <db_name>' is used.  The new database name must be unique 
+            to the target system.
+    -rp    <name>
+            Name of retention policy from the backup that will be restored. Optional. 
+            Requires that '-db <db_name>' is specified.
+    -newrp <name>
+            Name of the retention policy to be created on the target system. Optional. Requires that '-rp <rp_name>' 
+            is set. If not given, the '-rp <rp_name>' value is used.
+    -shard <id>
+            Identifier of the shard to be restored. Optional. If specified, then '-db <db_name>' and '-rp <rp_name>' are
+            required.
+    PATH
+            Path to directory containing the backup files.
 
 `)
 }
-
-type nopListener struct {
-	mu      sync.Mutex
-	closing chan struct{}
-}
-
-func newNopListener() *nopListener {
-	return &nopListener{closing: make(chan struct{})}
-}
-
-func (ln *nopListener) Accept() (net.Conn, error) {
-	ln.mu.Lock()
-	defer ln.mu.Unlock()
-
-	<-ln.closing
-	return nil, errors.New("listener closing")
-}
-
-func (ln *nopListener) Close() error {
-	if ln.closing != nil {
-		close(ln.closing)
-		ln.mu.Lock()
-		defer ln.mu.Unlock()
-
-		ln.closing = nil
-	}
-	return nil
-}
-
-func (ln *nopListener) Addr() net.Addr { return &net.TCPAddr{} }

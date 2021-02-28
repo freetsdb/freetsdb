@@ -4,12 +4,11 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"log"
 	"math/rand"
 	"os"
-	"strings"
 	"time"
 
+	"github.com/freetsdb/freetsdb/cmd"
 	"github.com/freetsdb/freetsdb/cmd/freetsd-ctl/backup"
 	"github.com/freetsdb/freetsdb/cmd/freetsd-ctl/help"
 	"github.com/freetsdb/freetsdb/cmd/freetsd-ctl/node"
@@ -48,8 +47,6 @@ func main() {
 
 // Main represents the program execution.
 type Main struct {
-	Logger *log.Logger
-
 	Stdin  io.Reader
 	Stdout io.Writer
 	Stderr io.Writer
@@ -58,7 +55,6 @@ type Main struct {
 // NewMain return a new instance of Main.
 func NewMain() *Main {
 	return &Main{
-		Logger: log.New(os.Stderr, "[run] ", log.LstdFlags),
 		Stdin:  os.Stdin,
 		Stdout: os.Stdout,
 		Stderr: os.Stderr,
@@ -67,7 +63,7 @@ func NewMain() *Main {
 
 // Run determines and runs the command specified by the CLI args.
 func (m *Main) Run(args ...string) error {
-	name, args := ParseCommandName(args)
+	name, args := cmd.ParseCommandName(args)
 
 	// Extract name from args.
 	switch name {
@@ -77,13 +73,13 @@ func (m *Main) Run(args ...string) error {
 		}
 
 	case "backup":
-		cmd := backup.NewCommand()
-		if err := cmd.Run(args...); err != nil {
+		name := backup.NewCommand()
+		if err := name.Run(args...); err != nil {
 			return fmt.Errorf("backup: %s", err)
 		}
 	case "restore":
-		cmd := restore.NewCommand()
-		if err := cmd.Run(args...); err != nil {
+		name := restore.NewCommand()
+		if err := name.Run(args...); err != nil {
 			return fmt.Errorf("restore: %s", err)
 		}
 	case "add-meta", "remove-meta", "add-data", "remove-data", "show":
@@ -96,32 +92,6 @@ func (m *Main) Run(args ...string) error {
 	}
 
 	return nil
-}
-
-// ParseCommandName extracts the command name and args from the args list.
-func ParseCommandName(args []string) (string, []string) {
-	// Retrieve command name as first argument.
-	var name string
-	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
-		name = args[0]
-	}
-
-	// Special case -h immediately following binary name
-	if len(args) > 0 && args[0] == "-h" {
-		name = "help"
-	}
-
-	// If command is "help" and has an argument then rewrite args to use "-h".
-	if name == "help" && len(args) > 1 {
-		args[0], args[1] = args[1], "-h"
-		name = args[0]
-	}
-
-	// If a named command is specified then return it with its arguments.
-	if name != "" {
-		return name, args[1:]
-	}
-	return "", args
 }
 
 // VersionCommand represents the command executed by "freetsd-ctl version".
@@ -142,7 +112,7 @@ func NewVersionCommand() *VersionCommand {
 func (cmd *VersionCommand) Run(args ...string) error {
 	// Parse flags in case -h is specified.
 	fs := flag.NewFlagSet("", flag.ContinueOnError)
-	fs.Usage = func() { fmt.Fprintln(cmd.Stderr, strings.TrimSpace(versionUsage)) }
+	fs.Usage = func() { fmt.Fprintln(cmd.Stderr, versionUsage) }
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -153,8 +123,7 @@ func (cmd *VersionCommand) Run(args ...string) error {
 	return nil
 }
 
-var versionUsage = `
-usage: version
+var versionUsage = `Displays the FreeTSDB version, build branch and git commit hash.
 
-	version displays the freetsd-ctl's version, build branch and git commit hash
+Usage: freetsd-ctl version
 `

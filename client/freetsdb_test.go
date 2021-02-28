@@ -1,6 +1,7 @@
 package client_test
 
 import (
+	"context"
 	"crypto/tls"
 	"encoding/json"
 	"errors"
@@ -139,8 +140,8 @@ func TestClient_Ping(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error.  expected %v, actual %v", nil, err)
 	}
-	if d == 0 {
-		t.Fatalf("expected a duration greater than zero.  actual %v", d)
+	if d.Nanoseconds() == 0 {
+		t.Fatalf("expected a duration greater than zero.  actual %v", d.Nanoseconds())
 	}
 	if version != "x.x" {
 		t.Fatalf("unexpected version.  expected %s,  actual %v", "x.x", version)
@@ -164,6 +165,142 @@ func TestClient_Query(t *testing.T) {
 
 	query := client.Query{}
 	_, err = c.Query(query)
+	if err != nil {
+		t.Fatalf("unexpected error.  expected %v, actual %v", nil, err)
+	}
+}
+
+func TestClient_Query_RP(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		params := r.URL.Query()
+		if got, exp := params.Get("db"), "db0"; got != exp {
+			t.Errorf("unexpected db query parameter: %s != %s", exp, got)
+		}
+		if got, exp := params.Get("rp"), "rp0"; got != exp {
+			t.Errorf("unexpected rp query parameter: %s != %s", exp, got)
+		}
+		var data client.Response
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(data)
+	}))
+	defer ts.Close()
+
+	u, _ := url.Parse(ts.URL)
+	config := client.Config{URL: *u}
+	c, err := client.NewClient(config)
+	if err != nil {
+		t.Fatalf("unexpected error.  expected %v, actual %v", nil, err)
+	}
+
+	query := client.Query{
+		Database:        "db0",
+		RetentionPolicy: "rp0",
+	}
+	_, err = c.Query(query)
+	if err != nil {
+		t.Fatalf("unexpected error.  expected %v, actual %v", nil, err)
+	}
+}
+
+func TestClient_ChunkedQuery(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var data client.Response
+		w.WriteHeader(http.StatusOK)
+		enc := json.NewEncoder(w)
+		_ = enc.Encode(data)
+		_ = enc.Encode(data)
+	}))
+	defer ts.Close()
+
+	u, _ := url.Parse(ts.URL)
+	config := client.Config{URL: *u}
+	c, err := client.NewClient(config)
+	if err != nil {
+		t.Fatalf("unexpected error.  expected %v, actual %v", nil, err)
+	}
+
+	query := client.Query{Chunked: true}
+	_, err = c.Query(query)
+	if err != nil {
+		t.Fatalf("unexpected error.  expected %v, actual %v", nil, err)
+	}
+}
+
+func TestClient_QueryContext(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var data client.Response
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(data)
+	}))
+	defer ts.Close()
+
+	u, _ := url.Parse(ts.URL)
+	config := client.Config{URL: *u}
+	c, err := client.NewClient(config)
+	if err != nil {
+		t.Fatalf("unexpected error.  expected %v, actual %v", nil, err)
+	}
+
+	query := client.Query{}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	_, err = c.QueryContext(ctx, query)
+	if err != nil {
+		t.Fatalf("unexpected error.  expected %v, actual %v", nil, err)
+	}
+}
+
+func TestClient_QueryContext_Cancelled(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var data client.Response
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(data)
+	}))
+	defer ts.Close()
+
+	u, _ := url.Parse(ts.URL)
+	config := client.Config{URL: *u}
+	c, err := client.NewClient(config)
+	if err != nil {
+		t.Fatalf("unexpected error.  expected %v, actual %v", nil, err)
+	}
+
+	query := client.Query{}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, err = c.QueryContext(ctx, query)
+	if err == nil {
+		t.Fatalf("Since context was cancelled an error was expected, but got nil.")
+	}
+}
+
+func TestClient_ChunkedQuery_WithContext(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var data client.Response
+		w.WriteHeader(http.StatusOK)
+		enc := json.NewEncoder(w)
+		_ = enc.Encode(data)
+		_ = enc.Encode(data)
+	}))
+	defer ts.Close()
+
+	u, _ := url.Parse(ts.URL)
+	config := client.Config{URL: *u}
+	c, err := client.NewClient(config)
+	if err != nil {
+		t.Fatalf("unexpected error.  expected %v, actual %v", nil, err)
+	}
+
+	query := client.Query{Chunked: true}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	_, err = c.QueryContext(ctx, query)
 	if err != nil {
 		t.Fatalf("unexpected error.  expected %v, actual %v", nil, err)
 	}
@@ -202,6 +339,12 @@ func TestClient_BasicAuth(t *testing.T) {
 
 func TestClient_Write(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		in, err := ioutil.ReadAll(r.Body)
+		if err != nil {
+			t.Fatalf("unexpected error: %s", err)
+		} else if have, want := strings.TrimSpace(string(in)), `m0,host=server01 v1=2,v2=2i,v3=2u,v4="foobar",v5=true 0`; have != want {
+			t.Errorf("unexpected write protocol: %s != %s", have, want)
+		}
 		var data client.Response
 		w.WriteHeader(http.StatusNoContent)
 		_ = json.NewEncoder(w).Encode(data)
@@ -215,7 +358,24 @@ func TestClient_Write(t *testing.T) {
 		t.Fatalf("unexpected error.  expected %v, actual %v", nil, err)
 	}
 
-	bp := client.BatchPoints{}
+	bp := client.BatchPoints{
+		Points: []client.Point{
+			{
+				Measurement: "m0",
+				Tags: map[string]string{
+					"host": "server01",
+				},
+				Time: time.Unix(0, 0).UTC(),
+				Fields: map[string]interface{}{
+					"v1": float64(2),
+					"v2": int64(2),
+					"v3": uint64(2),
+					"v4": "foobar",
+					"v5": true,
+				},
+			},
+		},
+	}
 	r, err := c.Write(bp)
 	if err != nil {
 		t.Fatalf("unexpected error.  expected %v, actual %v", nil, err)
@@ -250,11 +410,6 @@ func TestClient_UserAgent(t *testing.T) {
 			name:      "Empty user agent",
 			userAgent: "",
 			expected:  "FreeTSDBClient",
-		},
-		{
-			name:      "Custom user agent",
-			userAgent: "Test Freets Client",
-			expected:  "Test Freets Client",
 		},
 	}
 
@@ -294,6 +449,44 @@ func TestClient_UserAgent(t *testing.T) {
 		if receivedUserAgent != test.expected {
 			t.Fatalf("Unexpected user agent. expected %v, actual %v", test.expected, receivedUserAgent)
 		}
+	}
+}
+
+func TestClient_Messages(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"results":[{"messages":[{"level":"warning","text":"deprecation test"}]}]}`))
+	}))
+	defer ts.Close()
+
+	u, _ := url.Parse(ts.URL)
+	config := client.Config{URL: *u}
+	c, err := client.NewClient(config)
+	if err != nil {
+		t.Fatalf("unexpected error.  expected %v, actual %v", nil, err)
+	}
+
+	query := client.Query{}
+	resp, err := c.Query(query)
+	if err != nil {
+		t.Fatalf("unexpected error.  expected %v, actual %v", nil, err)
+	}
+
+	if got, exp := len(resp.Results), 1; got != exp {
+		t.Fatalf("unexpected number of results.  expected %v, actual %v", exp, got)
+	}
+
+	r := resp.Results[0]
+	if got, exp := len(r.Messages), 1; got != exp {
+		t.Fatalf("unexpected number of messages.  expected %v, actual %v", exp, got)
+	}
+
+	m := r.Messages[0]
+	if got, exp := m.Level, "warning"; got != exp {
+		t.Errorf("unexpected message level.  expected %v, actual %v", exp, got)
+	}
+	if got, exp := m.Text, "deprecation test"; got != exp {
+		t.Errorf("unexpected message text.  expected %v, actual %v", exp, got)
 	}
 }
 
@@ -477,7 +670,7 @@ func TestEpochToTime(t *testing.T) {
 		if e != nil {
 			t.Fatalf("unexpected error: expected %v, actual: %v", nil, e)
 		}
-		if tm != test.expected {
+		if !tm.Equal(test.expected) {
 			t.Fatalf("unexpected time: expected %v, actual %v", test.expected, tm)
 		}
 	}
@@ -487,8 +680,8 @@ func TestEpochToTime(t *testing.T) {
 
 func emptyTestServer() *httptest.Server {
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("X-FreeTSDB-Version", "x.x")
-		return
+		time.Sleep(50 * time.Millisecond)
+		w.Header().Set("X-Freetsdb-Version", "x.x")
 	}))
 }
 
@@ -580,33 +773,58 @@ func TestClient_NoTimeout(t *testing.T) {
 	}
 }
 
-func TestClient_WriteUint64(t *testing.T) {
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		var data client.Response
-		w.WriteHeader(http.StatusNoContent)
-		_ = json.NewEncoder(w).Encode(data)
-	}))
-	defer ts.Close()
-
-	u, _ := url.Parse(ts.URL)
-	config := client.Config{URL: *u}
-	c, err := client.NewClient(config)
-	if err != nil {
-		t.Fatalf("unexpected error.  expected %v, actual %v", nil, err)
-	}
-	bp := client.BatchPoints{
-		Points: []client.Point{
-			{
-				Fields: map[string]interface{}{"value": uint64(10)},
-			},
+func TestClient_ParseConnectionString(t *testing.T) {
+	for _, tt := range []struct {
+		addr string
+		ssl  bool
+		exp  string
+	}{
+		{
+			addr: "localhost",
+			exp:  "http://localhost:8086",
 		},
-	}
-	r, err := c.Write(bp)
-	if err == nil {
-		t.Fatalf("unexpected error. expected err, actual %v", err)
-	}
-	if r != nil {
-		t.Fatalf("unexpected response. expected %v, actual %v", nil, r)
+		{
+			addr: "localhost:8086",
+			exp:  "http://localhost:8086",
+		},
+		{
+			addr: "localhost:80",
+			exp:  "http://localhost",
+		},
+		{
+			addr: "localhost",
+			exp:  "https://localhost:8086",
+			ssl:  true,
+		},
+		{
+			addr: "localhost:443",
+			exp:  "https://localhost",
+			ssl:  true,
+		},
+		{
+			addr: "localhost:80",
+			exp:  "https://localhost:80",
+			ssl:  true,
+		},
+		{
+			addr: "localhost:443",
+			exp:  "http://localhost:443",
+		},
+	} {
+		name := tt.addr
+		if tt.ssl {
+			name += "+ssl"
+		}
+		t.Run(name, func(t *testing.T) {
+			u, err := client.ParseConnectionString(tt.addr, tt.ssl)
+			if err != nil {
+				t.Fatalf("unexpected error: %s", err)
+			}
+
+			if got, want := u.String(), tt.exp; got != want {
+				t.Fatalf("unexpected connection string: got=%s want=%s", got, want)
+			}
+		})
 	}
 }
 
@@ -618,5 +836,182 @@ func TestClient_ParseConnectionString_IPv6(t *testing.T) {
 	}
 	if u.Host != path {
 		t.Fatalf("ipv6 parse failed, expected %s, actual %s", path, u.Host)
+	}
+}
+
+func TestClient_CustomCertificates(t *testing.T) {
+	// generated with:
+	// openssl req -x509 -newkey rsa:2048 -keyout key.pem -out cert.pem -days 3650 -nodes -config influx.cnf
+	// influx.cnf:
+	// [req]
+	// distinguished_name = req_distinguished_name
+	// x509_extensions = v3_req
+	// prompt = no
+	// [req_distinguished_name]
+	// C = US
+	// ST = CA
+	// L = San Francisco
+	// O = FreeTSDB
+	// CN = github.com/freetsdb
+	// [v3_req]
+	// keyUsage = keyEncipherment, dataEncipherment
+	// extendedKeyUsage = serverAuth
+	// subjectAltName = @alt_names
+	// [alt_names]
+	// IP.1 = 127.0.0.1
+	//
+	key := `
+-----BEGIN PRIVATE KEY-----
+MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQDLswqKJLxfhBRi
+4qdj7+jpBxTAi4MewrcMPp+9YlbLke3F7w2DPrZVkYVeWmg8LyTPAigrXeadK6hv
+qjRr05a7sMc5+ynivGbWUySWT+u17V85x6VR5TMIkJEOqpiIU8aYk0l+3UcrzVjS
+1QZCUBoxVwAVaSR6AXTA8YrVXdk/AI3f22dYiBjFmV4LJJkGjTaCnlDKu54hMU1t
+WTyFcoY9TBzZ1XA+ng5RQ/QADeL2PYrTW4s/mLI3jfKKD53EI4uM2FjW37ZfuxTa
+mhCR7/lxM4COg9K70y5uebfqJvuoXAwXLOzVbdfF5b9fJFbL67kaK2tiMT3Wt39m
+hXzclLTDAgMBAAECggEAK8mpElkjRUUXPMqMQSdpYe5rv5g973bb8n3jyMpC7i/I
+dSwWM4hfmbVWfhnhHk7kErvb9raQxGiGJLrp2eP6Gw69RPGA54SodpoY21cCzHDi
+b4FDQH+MoOKyy/xQHb4kitfejK70ha320huI5OhjOQgCtJeNh8yYVIGX3pX2BVyu
+36UB9tfX1S5pbiHeih3vZGd322Muj/joNzIelnYRBnoO0xqvQ0S1Dk+dLCTHO0/m
+u9AZN8c2TsRWZpJPMWwBv8LuABbE0e66/TSsrfklAn86ELCo44lZURDE7uPZ4pIH
+FWtmf+nW5Hy6aPhy60E40MqotlejhWwB3ktY/m3JAQKBgQDuB4nhxzJA9lH9EaCt
+byvJ9wGVvI3k79hOwc/Z2R3dNe+Ma+TJy+aBppvsLF4qz83aWC+canyasbHcPNR/
+vXQGlsgKfucrmd1PfMV7uvOIkfOjK0E6mRC+jMuKtNTQrdtM1BU/Z7LY0iy0fNJ6
+aNqhFdlJmmk0g+4bR4SAWB6FkwKBgQDbE/7r1u+GdJk/mhdjTi1aegr9lXb0l7L6
+BCvOYhs/Z/pXfsaYPSXhgk2w+LiGk6BaEA2/4Sr0YS2MAAaIhBVeFBIXVpNrXB3K
+Yg1jOEeLQ3qoVBeJFhJNrN9ZQx33HANC1W/Y1apMwaYqCRUGVQkrdcsN2KNea1z0
+3qeYeCCSEQKBgCKZKeuNfrp+k1BLnaVYAW9r3ekb7SwXyMM53LJ3oqWiz10D2c+T
+OcAirYtYr59dcTiJlPIRcGcz6PxwQxsGOLU0eYM9CvEFfmutYS8o73ksbdOL2AFi
+elKYOIXC3yQuATBbq3L56b8mXaUmd5mfYBgGCv1t2ljtzFBext248UbNAoGBAIv1
+2V24YiwnH6THf/ucfVMZNx5Mt8OJivk5YvcmLDw05HWzc5LdNe89PP871z963u3K
+5c3ZP4UC9INFnOboY3JIJkqsr9/d6NZcECt8UBDDmoAhwSt+Y1EmiUZQn7s4NUkk
+bKE919/Ts6GVTc5O013lkkUVS0HOG4QBH1dEH6LRAoGAStl11WA9tuKXiBl5XG/C
+cq9mFPNJK3pEgd6YH874vEnYEEqENR4MFK3uWXus9Nm+VYxbUbPEzFF4kpsfukDg
+/JAVqY4lUam7g6fyyaoIIPQEp7jGjbsUf46IjnUjFcaojOugA3EAfn9awREUDuJZ
+cvh4WzEegcExTppINW1NB5E=
+-----END PRIVATE KEY-----
+`
+	cert := `
+-----BEGIN CERTIFICATE-----
+MIIDdjCCAl6gAwIBAgIJAMYGAwkxUV51MA0GCSqGSIb3DQEBCwUAMFgxCzAJBgNV
+BAYTAlVTMQswCQYDVQQIDAJDQTEWMBQGA1UEBwwNU2FuIEZyYW5jaXNjbzERMA8G
+A1UECgwISW5mbHV4REIxETAPBgNVBAMMCGluZmx1eGRiMB4XDTE1MTIyOTAxNTg1
+NloXDTI1MTIyNjAxNTg1NlowWDELMAkGA1UEBhMCVVMxCzAJBgNVBAgMAkNBMRYw
+FAYDVQQHDA1TYW4gRnJhbmNpc2NvMREwDwYDVQQKDAhJbmZsdXhEQjERMA8GA1UE
+AwwIaW5mbHV4ZGIwggEiMA0GCSqGSIb3DQEBAQUAA4IBDwAwggEKAoIBAQDLswqK
+JLxfhBRi4qdj7+jpBxTAi4MewrcMPp+9YlbLke3F7w2DPrZVkYVeWmg8LyTPAigr
+XeadK6hvqjRr05a7sMc5+ynivGbWUySWT+u17V85x6VR5TMIkJEOqpiIU8aYk0l+
+3UcrzVjS1QZCUBoxVwAVaSR6AXTA8YrVXdk/AI3f22dYiBjFmV4LJJkGjTaCnlDK
+u54hMU1tWTyFcoY9TBzZ1XA+ng5RQ/QADeL2PYrTW4s/mLI3jfKKD53EI4uM2FjW
+37ZfuxTamhCR7/lxM4COg9K70y5uebfqJvuoXAwXLOzVbdfF5b9fJFbL67kaK2ti
+MT3Wt39mhXzclLTDAgMBAAGjQzBBMAwGA1UdEwQFMAMBAf8wCwYDVR0PBAQDAgQw
+MBMGA1UdJQQMMAoGCCsGAQUFBwMBMA8GA1UdEQQIMAaHBH8AAAEwDQYJKoZIhvcN
+AQELBQADggEBAJxgHeduV9q2BuKnrt+sjXLGn/HwbMbgGbgFK6kUKJBWtv6Pa7JJ
+m4teDmTMWiaeB2g4N2bmaWTuEZzzShNKG5roFeWm1ilFMAyzkb+VifN4YuDKH62F
+3e259qsytiGbbJF3F//4sjfMw8qZVEPvspG1zKsASo0PpSOOUFmxcj0oMAXhnMrk
+rRcbk6fufhyq0iZGl8ZLKTCrkjk0b3qlNs6UaRD9/XBB59VlQ8I338sfjV06edwY
+jn5Amab0uyoFNEp70Y4WGxrxUTS1GAC1LCA13S7EnidD440UrnWALTarjmHAK6aW
+war3JNM1mGB3o2iAtuOJlFIKLpI1x+1e8pI=
+-----END CERTIFICATE-----
+`
+	cer, err := tls.X509KeyPair([]byte(cert), []byte(key))
+
+	if err != nil {
+		t.Fatalf("Received error: %v", err)
+	}
+
+	server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var data client.Response
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(data)
+	}))
+	server.TLS = &tls.Config{Certificates: []tls.Certificate{cer}}
+	server.TLS.BuildNameToCertificate()
+	server.StartTLS()
+	defer server.Close()
+
+	certFile, _ := ioutil.TempFile("", "influx-cert-")
+	certFile.WriteString(cert)
+	certFile.Close()
+	defer os.Remove(certFile.Name())
+
+	u, _ := url.Parse(server.URL)
+
+	tests := []struct {
+		name      string
+		unsafeSsl bool
+		expected  error
+	}{
+		{name: "validate certificates", unsafeSsl: false, expected: errors.New("error")},
+		{name: "not validate certificates", unsafeSsl: true, expected: nil},
+	}
+
+	for _, test := range tests {
+		config := client.Config{URL: *u, UnsafeSsl: test.unsafeSsl}
+		c, err := client.NewClient(config)
+		if err != nil {
+			t.Fatalf("unexpected error. expected %v, actual %v", nil, err)
+		}
+		query := client.Query{}
+		_, err = c.Query(query)
+
+		if (test.expected == nil) != (err == nil) {
+			t.Fatalf("%s: expected %v. got %v. unsafeSsl: %v", test.name, test.expected, err, test.unsafeSsl)
+		}
+	}
+}
+
+func TestChunkedResponse(t *testing.T) {
+	s := `{"results":[{},{}]}{"results":[{}]}`
+	r := client.NewChunkedResponse(strings.NewReader(s))
+	resp, err := r.NextResponse()
+	if err != nil {
+		t.Fatalf("unexpected error.  expected %v, actual %v", nil, err)
+	} else if actual := len(resp.Results); actual != 2 {
+		t.Fatalf("unexpected number of results.  expected %v, actual %v", 2, actual)
+	}
+
+	resp, err = r.NextResponse()
+	if err != nil {
+		t.Fatalf("unexpected error.  expected %v, actual %v", nil, err)
+	} else if actual := len(resp.Results); actual != 1 {
+		t.Fatalf("unexpected number of results.  expected %v, actual %v", 1, actual)
+	}
+
+	resp, err = r.NextResponse()
+	if err != nil {
+		t.Fatalf("unexpected error.  expected %v, actual %v", nil, err)
+	} else if resp != nil {
+		t.Fatalf("unexpected response.  expected %v, actual %v", nil, resp)
+	}
+}
+
+func TestClient_Proxy(t *testing.T) {
+	pinged := false
+	server := httptest.NewServer(http.HandlerFunc(func(resp http.ResponseWriter, req *http.Request) {
+		if got, want := req.URL.String(), "http://example.com:8086/ping"; got != want {
+			t.Errorf("invalid url in request: got=%s want=%s", got, want)
+		}
+		resp.WriteHeader(http.StatusNoContent)
+		pinged = true
+	}))
+	defer server.Close()
+
+	proxyURL, _ := url.Parse(server.URL)
+	c, err := client.NewClient(client.Config{
+		URL: url.URL{
+			Scheme: "http",
+			Host:   "example.com:8086",
+		},
+		Proxy: http.ProxyURL(proxyURL),
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %s", err)
+	}
+	if _, _, err := c.Ping(); err != nil {
+		t.Fatalf("could not ping server: %s", err)
+	}
+
+	if !pinged {
+		t.Fatalf("no http request was received")
 	}
 }

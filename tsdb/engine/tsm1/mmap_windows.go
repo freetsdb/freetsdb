@@ -44,6 +44,11 @@ func openSharedFile(f *os.File) (file *os.File, err error) {
 }
 
 func mmap(f *os.File, offset int64, length int) (out []byte, err error) {
+	// TODO: Add support for anonymous mapping on windows
+	if f == nil {
+		return make([]byte, length), nil
+	}
+
 	// Open a file mapping handle.
 	sizelo := uint32(length >> 32)
 	sizehi := uint32(length) & 0xffffffff
@@ -113,5 +118,16 @@ func munmap(b []byte) (err error) {
 	if e != nil {
 		return errors.New("close file" + e.Error())
 	}
+	return nil
+}
+
+// madviseWillNeed is unsupported on Windows.
+func madviseWillNeed(b []byte) error { return nil }
+
+// madviseDontNeed is unsupported on Windows.
+func madviseDontNeed(b []byte) error { return nil }
+
+func madvise(b []byte, advice int) error {
+	// Not implemented
 	return nil
 }

@@ -1,15 +1,19 @@
+// use github.com/freetsdb/freetsdb/client/v2 instead.
 package client // import "github.com/freetsdb/freetsdb/client"
 
 import (
 	"bytes"
+	"context"
 	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/ioutil"
 	"net"
 	"net/http"
 	"net/url"
+	"path"
 	"strconv"
 	"strings"
 	"time"
@@ -32,6 +36,31 @@ const (
 type Query struct {
 	Command  string
 	Database string
+
+	// RetentionPolicy tells the server which retention policy to use by default.
+	// This option is only effective when querying a server of version 1.6.0 or later.
+	RetentionPolicy string
+
+	// Chunked tells the server to send back chunked responses. This places
+	// less load on the server by sending back chunks of the response rather
+	// than waiting for the entire response all at once.
+	Chunked bool
+
+	// ChunkSize sets the maximum number of rows that will be returned per
+	// chunk. Chunks are either divided based on their series or if they hit
+	// the chunk size limit.
+	//
+	// Chunked must be set to true for this option to be used.
+	ChunkSize int
+
+	// NodeID sets the data node to use for the query results. This option only
+	// has any effect in the enterprise version of the software where there can be
+	// more than one data node and is primarily useful for analyzing differences in
+	// data. The default behavior is to automatically select the appropriate data
+	// nodes to retrieve all of the data. On a database where the number of data nodes
+	// is greater than the replication factor, it is expected that setting this option
+	// will only retrieve partial data.
+	NodeID int
 }
 
 // ParseConnectionString will parse a string to create a valid connection URL
@@ -58,12 +87,16 @@ func ParseConnectionString(path string, ssl bool) (url.URL, error) {
 
 	u := url.URL{
 		Scheme: "http",
+		Host:   host,
 	}
 	if ssl {
 		u.Scheme = "https"
+		if port != 443 {
+			u.Host = net.JoinHostPort(host, strconv.Itoa(port))
+		}
+	} else if port != 80 {
+		u.Host = net.JoinHostPort(host, strconv.Itoa(port))
 	}
-
-	u.Host = net.JoinHostPort(host, strconv.Itoa(port))
 
 	return u, nil
 }
@@ -74,13 +107,17 @@ func ParseConnectionString(path string, ssl bool) (url.URL, error) {
 // UserAgent: If not provided, will default "FreeTSDBClient",
 // Timeout: If not provided, will default to 0 (no timeout)
 type Config struct {
-	URL       url.URL
-	Username  string
-	Password  string
-	UserAgent string
-	Timeout   time.Duration
-	Precision string
-	UnsafeSsl bool
+	URL              url.URL
+	UnixSocket       string
+	Username         string
+	Password         string
+	UserAgent        string
+	Timeout          time.Duration
+	Precision        string
+	WriteConsistency string
+	UnsafeSsl        bool
+	Proxy            func(req *http.Request) (*url.URL, error)
+	TLS              *tls.Config
 }
 
 // NewConfig will create a config to be used in connecting to the client
@@ -93,6 +130,7 @@ func NewConfig() Config {
 // Client is used to make calls to the server.
 type Client struct {
 	url        url.URL
+	unixSocket string
 	username   string
 	password   string
 	httpClient *http.Client
@@ -116,16 +154,29 @@ const (
 
 // NewClient will instantiate and return a connected client to issue commands to the server.
 func NewClient(c Config) (*Client, error) {
-	tlsConfig := &tls.Config{
-		InsecureSkipVerify: c.UnsafeSsl,
+	tlsConfig := new(tls.Config)
+	if c.TLS != nil {
+		tlsConfig = c.TLS.Clone()
 	}
+	tlsConfig.InsecureSkipVerify = c.UnsafeSsl
 
 	tr := &http.Transport{
+		Proxy:           c.Proxy,
 		TLSClientConfig: tlsConfig,
+	}
+
+	if c.UnixSocket != "" {
+		// No need for compression in local communications.
+		tr.DisableCompression = true
+
+		tr.DialContext = func(_ context.Context, _, _ string) (net.Conn, error) {
+			return net.Dial("unix", c.UnixSocket)
+		}
 	}
 
 	client := Client{
 		url:        c.URL,
+		unixSocket: c.UnixSocket,
 		username:   c.Username,
 		password:   c.Password,
 		httpClient: &http.Client{Timeout: c.Timeout, Transport: tr},
@@ -151,18 +202,36 @@ func (c *Client) SetPrecision(precision string) {
 
 // Query sends a command to the server and returns the Response
 func (c *Client) Query(q Query) (*Response, error) {
-	u := c.url
+	return c.QueryContext(context.Background(), q)
+}
 
-	u.Path = "query"
+// QueryContext sends a command to the server and returns the Response
+// It uses a context that can be cancelled by the command line client
+func (c *Client) QueryContext(ctx context.Context, q Query) (*Response, error) {
+	u := c.url
+	u.Path = path.Join(u.Path, "query")
+
 	values := u.Query()
 	values.Set("q", q.Command)
 	values.Set("db", q.Database)
+	if q.RetentionPolicy != "" {
+		values.Set("rp", q.RetentionPolicy)
+	}
+	if q.Chunked {
+		values.Set("chunked", "true")
+		if q.ChunkSize > 0 {
+			values.Set("chunk_size", strconv.Itoa(q.ChunkSize))
+		}
+	}
+	if q.NodeID > 0 {
+		values.Set("node_id", strconv.Itoa(q.NodeID))
+	}
 	if c.precision != "" {
 		values.Set("epoch", c.precision)
 	}
 	u.RawQuery = values.Encode()
 
-	req, err := http.NewRequest("GET", u.String(), nil)
+	req, err := http.NewRequest("POST", u.String(), nil)
 	if err != nil {
 		return nil, err
 	}
@@ -171,6 +240,8 @@ func (c *Client) Query(q Query) (*Response, error) {
 		req.SetBasicAuth(c.username, c.password)
 	}
 
+	req = req.WithContext(ctx)
+
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		return nil, err
@@ -178,19 +249,38 @@ func (c *Client) Query(q Query) (*Response, error) {
 	defer resp.Body.Close()
 
 	var response Response
-	dec := json.NewDecoder(resp.Body)
-	dec.UseNumber()
-	decErr := dec.Decode(&response)
+	if q.Chunked {
+		cr := NewChunkedResponse(resp.Body)
+		for {
+			r, err := cr.NextResponse()
+			if err != nil {
+				// If we got an error while decoding the response, send that back.
+				return nil, err
+			}
 
-	// ignore this error if we got an invalid status code
-	if decErr != nil && decErr.Error() == "EOF" && resp.StatusCode != http.StatusOK {
-		decErr = nil
+			if r == nil {
+				break
+			}
+
+			response.Results = append(response.Results, r.Results...)
+			if r.Err != nil {
+				response.Err = r.Err
+				break
+			}
+		}
+	} else {
+		dec := json.NewDecoder(resp.Body)
+		dec.UseNumber()
+		if err := dec.Decode(&response); err != nil {
+			// Ignore EOF errors if we got an invalid status code.
+			if !(err == io.EOF && resp.StatusCode != http.StatusOK) {
+				return nil, err
+			}
+		}
 	}
-	// If we got a valid decode error, send that back
-	if decErr != nil {
-		return nil, decErr
-	}
-	// If we don't have an error in our json response, and didn't get StatusOK, then send back an error
+
+	// If we don't have an error in our json response, and didn't get StatusOK,
+	// then send back an error.
 	if resp.StatusCode != http.StatusOK && response.Error() == nil {
 		return &response, fmt.Errorf("received status code %d from server", resp.StatusCode)
 	}
@@ -202,7 +292,7 @@ func (c *Client) Query(q Query) (*Response, error) {
 // If an error occurs, Response may contain additional information if populated.
 func (c *Client) Write(bp BatchPoints) (*Response, error) {
 	u := c.url
-	u.Path = "write"
+	u.Path = path.Join(u.Path, "write")
 
 	var b bytes.Buffer
 	for _, p := range bp.Points {
@@ -280,7 +370,7 @@ func (c *Client) Write(bp BatchPoints) (*Response, error) {
 // If an error occurs, Response may contain additional information if populated.
 func (c *Client) WriteLineProtocol(data, database, retentionPolicy, precision, writeConsistency string) (*Response, error) {
 	u := c.url
-	u.Path = "write"
+	u.Path = path.Join(u.Path, "write")
 
 	r := strings.NewReader(data)
 
@@ -325,8 +415,9 @@ func (c *Client) WriteLineProtocol(data, database, retentionPolicy, precision, w
 // Ping returns how long the request took, the version of the server it connected to, and an error if one occurred.
 func (c *Client) Ping() (time.Duration, string, error) {
 	now := time.Now()
+
 	u := c.url
-	u.Path = "ping"
+	u.Path = path.Join(u.Path, "ping")
 
 	req, err := http.NewRequest("GET", u.String(), nil)
 	if err != nil {
@@ -343,28 +434,37 @@ func (c *Client) Ping() (time.Duration, string, error) {
 	}
 	defer resp.Body.Close()
 
-	version := resp.Header.Get("X-FreeTSDB-Version")
+	version := resp.Header.Get("X-Freetsdb-Version")
 	return time.Since(now), version, nil
 }
 
 // Structs
 
+// Message represents a user message.
+type Message struct {
+	Level string `json:"level,omitempty"`
+	Text  string `json:"text,omitempty"`
+}
+
 // Result represents a resultset returned from a single statement.
 type Result struct {
-	Series []models.Row
-	Err    error
+	Series   []models.Row
+	Messages []*Message
+	Err      error
 }
 
 // MarshalJSON encodes the result into JSON.
 func (r *Result) MarshalJSON() ([]byte, error) {
 	// Define a struct that outputs "error" as a string.
 	var o struct {
-		Series []models.Row `json:"series,omitempty"`
-		Err    string       `json:"error,omitempty"`
+		Series   []models.Row `json:"series,omitempty"`
+		Messages []*Message   `json:"messages,omitempty"`
+		Err      string       `json:"error,omitempty"`
 	}
 
 	// Copy fields to output struct.
 	o.Series = r.Series
+	o.Messages = r.Messages
 	if r.Err != nil {
 		o.Err = r.Err.Error()
 	}
@@ -375,8 +475,9 @@ func (r *Result) MarshalJSON() ([]byte, error) {
 // UnmarshalJSON decodes the data into the Result struct
 func (r *Result) UnmarshalJSON(b []byte) error {
 	var o struct {
-		Series []models.Row `json:"series,omitempty"`
-		Err    string       `json:"error,omitempty"`
+		Series   []models.Row `json:"series,omitempty"`
+		Messages []*Message   `json:"messages,omitempty"`
+		Err      string       `json:"error,omitempty"`
 	}
 
 	dec := json.NewDecoder(bytes.NewBuffer(b))
@@ -386,6 +487,7 @@ func (r *Result) UnmarshalJSON(b []byte) error {
 		return err
 	}
 	r.Series = o.Series
+	r.Messages = o.Messages
 	if o.Err != "" {
 		r.Err = errors.New(o.Err)
 	}
@@ -437,7 +539,7 @@ func (r *Response) UnmarshalJSON(b []byte) error {
 
 // Error returns the first error from any statement.
 // Returns nil if no errors occurred on any statements.
-func (r Response) Error() error {
+func (r *Response) Error() error {
 	if r.Err != nil {
 		return r.Err
 	}
@@ -447,6 +549,55 @@ func (r Response) Error() error {
 		}
 	}
 	return nil
+}
+
+// duplexReader reads responses and writes it to another writer while
+// satisfying the reader interface.
+type duplexReader struct {
+	r io.Reader
+	w io.Writer
+}
+
+func (r *duplexReader) Read(p []byte) (n int, err error) {
+	n, err = r.r.Read(p)
+	if err == nil {
+		r.w.Write(p[:n])
+	}
+	return n, err
+}
+
+// ChunkedResponse represents a response from the server that
+// uses chunking to stream the output.
+type ChunkedResponse struct {
+	dec    *json.Decoder
+	duplex *duplexReader
+	buf    bytes.Buffer
+}
+
+// NewChunkedResponse reads a stream and produces responses from the stream.
+func NewChunkedResponse(r io.Reader) *ChunkedResponse {
+	resp := &ChunkedResponse{}
+	resp.duplex = &duplexReader{r: r, w: &resp.buf}
+	resp.dec = json.NewDecoder(resp.duplex)
+	resp.dec.UseNumber()
+	return resp
+}
+
+// NextResponse reads the next line of the stream and returns a response.
+func (r *ChunkedResponse) NextResponse() (*Response, error) {
+	var response Response
+	if err := r.dec.Decode(&response); err != nil {
+		if err == io.EOF {
+			return nil, nil
+		}
+		// A decoding error happened. This probably means the server crashed
+		// and sent a last-ditch error message to us. Ensure we have read the
+		// entirety of the connection to get any remaining error text.
+		io.Copy(ioutil.Discard, r.duplex)
+		return nil, errors.New(strings.TrimSpace(r.buf.String()))
+	}
+	r.buf.Reset()
+	return &response, nil
 }
 
 // Point defines the fields that will be written to the database
@@ -488,7 +639,7 @@ func (p *Point) MarshalJSON() ([]byte, error) {
 // MarshalString renders string representation of a Point with specified
 // precision. The default precision is nanoseconds.
 func (p *Point) MarshalString() string {
-	pt, err := models.NewPoint(p.Measurement, p.Tags, p.Fields, p.Time)
+	pt, err := models.NewPoint(p.Measurement, models.NewTags(p.Tags), p.Fields, p.Time)
 	if err != nil {
 		return "# ERROR: " + err.Error() + " " + p.Measurement
 	}
@@ -653,6 +804,9 @@ func (bp *BatchPoints) UnmarshalJSON(b []byte) error {
 
 // Addr provides the current url as a string of the server the client is connected to.
 func (c *Client) Addr() string {
+	if c.unixSocket != "" {
+		return c.unixSocket
+	}
 	return c.url.String()
 }
 
@@ -660,7 +814,7 @@ func (c *Client) Addr() string {
 func checkPointTypes(p Point) error {
 	for _, v := range p.Fields {
 		switch v.(type) {
-		case int, int8, int16, int32, int64, uint, uint8, uint16, uint32, float32, float64, bool, string, nil:
+		case int, int8, int16, int32, int64, uint, uint8, uint16, uint32, uint64, float32, float64, bool, string, nil:
 			return nil
 		default:
 			return fmt.Errorf("unsupported point type: %T", v)

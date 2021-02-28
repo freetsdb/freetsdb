@@ -12,11 +12,11 @@ import (
 // Create a new client
 func ExampleClient() {
 	// NOTE: this assumes you've setup a user and have setup shell env variables,
-	// namely FREETS_USER/FREETS_PWD. If not just omit Username/Password below.
+	// namely INFLUX_USER/INFLUX_PWD. If not just omit Username/Password below.
 	_, err := client.NewHTTPClient(client.HTTPConfig{
 		Addr:     "http://localhost:8086",
-		Username: os.Getenv("FREETS_USER"),
-		Password: os.Getenv("FREETS_PWD"),
+		Username: os.Getenv("INFLUX_USER"),
+		Password: os.Getenv("INFLUX_PWD"),
 	})
 	if err != nil {
 		fmt.Println("Error creating FreeTSDB Client: ", err.Error())

@@ -13,11 +13,14 @@ const (
 	ILLEGAL Token = iota
 	EOF
 	WS
+	COMMENT
 
 	literalBeg
 	// IDENT and the following are InfluxQL literal tokens.
 	IDENT       // main
+	BOUNDPARAM  // $param
 	NUMBER      // 12345.67
+	INTEGER     // 12345
 	DURATIONVAL // 13h
 	STRING      // "abc"
 	BADSTRING   // "abc
@@ -30,10 +33,14 @@ const (
 
 	operatorBeg
 	// ADD and the following are InfluxQL Operators
-	ADD // +
-	SUB // -
-	MUL // *
-	DIV // /
+	ADD         // +
+	SUB         // -
+	MUL         // *
+	DIV         // /
+	MOD         // %
+	BITWISE_AND // &
+	BITWISE_OR  // |
+	BITWISE_XOR // ^
 
 	AND // AND
 	OR  // OR
@@ -48,27 +55,30 @@ const (
 	GTE      // >=
 	operatorEnd
 
-	LPAREN    // (
-	RPAREN    // )
-	COMMA     // ,
-	COLON     // :
-	SEMICOLON // ;
-	DOT       // .
+	LPAREN      // (
+	RPAREN      // )
+	COMMA       // ,
+	COLON       // :
+	DOUBLECOLON // ::
+	SEMICOLON   // ;
+	DOT         // .
 
 	keywordBeg
 	// ALL and the following are InfluxQL Keywords
 	ALL
 	ALTER
+	ANALYZE
 	ANY
 	AS
 	ASC
 	BEGIN
 	BY
+	CARDINALITY
 	CREATE
 	CONTINUOUS
-	DATA
 	DATABASE
 	DATABASES
+	SERVERS
 	DEFAULT
 	DELETE
 	DESC
@@ -79,30 +89,26 @@ const (
 	DURATION
 	END
 	EVERY
-	EXISTS
+	EXACT
 	EXPLAIN
 	FIELD
 	FOR
-	FORCE
 	FROM
 	GRANT
 	GRANTS
 	GROUP
 	GROUPS
-	IF
 	IN
 	INF
-	INNER
 	INSERT
 	INTO
 	KEY
 	KEYS
+	KILL
 	LIMIT
-	META
 	MEASUREMENT
 	MEASUREMENTS
 	NAME
-	NOT
 	OFFSET
 	ON
 	ORDER
@@ -119,8 +125,6 @@ const (
 	REVOKE
 	SELECT
 	SERIES
-	SERVER
-	SERVERS
 	SET
 	SHOW
 	SHARD
@@ -156,10 +160,14 @@ var tokens = [...]string{
 	FALSE:       "FALSE",
 	REGEX:       "REGEX",
 
-	ADD: "+",
-	SUB: "-",
-	MUL: "*",
-	DIV: "/",
+	ADD:         "+",
+	SUB:         "-",
+	MUL:         "*",
+	DIV:         "/",
+	MOD:         "%",
+	BITWISE_AND: "&",
+	BITWISE_OR:  "|",
+	BITWISE_XOR: "^",
 
 	AND: "AND",
 	OR:  "OR",
@@ -173,25 +181,28 @@ var tokens = [...]string{
 	GT:       ">",
 	GTE:      ">=",
 
-	LPAREN:    "(",
-	RPAREN:    ")",
-	COMMA:     ",",
-	COLON:     ":",
-	SEMICOLON: ";",
-	DOT:       ".",
+	LPAREN:      "(",
+	RPAREN:      ")",
+	COMMA:       ",",
+	COLON:       ":",
+	DOUBLECOLON: "::",
+	SEMICOLON:   ";",
+	DOT:         ".",
 
 	ALL:           "ALL",
 	ALTER:         "ALTER",
+	ANALYZE:       "ANALYZE",
 	ANY:           "ANY",
 	AS:            "AS",
 	ASC:           "ASC",
 	BEGIN:         "BEGIN",
 	BY:            "BY",
+	CARDINALITY:   "CARDINALITY",
 	CREATE:        "CREATE",
 	CONTINUOUS:    "CONTINUOUS",
-	DATA:          "DATA",
 	DATABASE:      "DATABASE",
 	DATABASES:     "DATABASES",
+	SERVERS:       "SERVERS",
 	DEFAULT:       "DEFAULT",
 	DELETE:        "DELETE",
 	DESC:          "DESC",
@@ -202,30 +213,26 @@ var tokens = [...]string{
 	DURATION:      "DURATION",
 	END:           "END",
 	EVERY:         "EVERY",
-	EXISTS:        "EXISTS",
+	EXACT:         "EXACT",
 	EXPLAIN:       "EXPLAIN",
 	FIELD:         "FIELD",
 	FOR:           "FOR",
-	FORCE:         "FORCE",
 	FROM:          "FROM",
 	GRANT:         "GRANT",
 	GRANTS:        "GRANTS",
 	GROUP:         "GROUP",
 	GROUPS:        "GROUPS",
-	IF:            "IF",
 	IN:            "IN",
 	INF:           "INF",
-	INNER:         "INNER",
 	INSERT:        "INSERT",
 	INTO:          "INTO",
 	KEY:           "KEY",
 	KEYS:          "KEYS",
+	KILL:          "KILL",
 	LIMIT:         "LIMIT",
 	MEASUREMENT:   "MEASUREMENT",
 	MEASUREMENTS:  "MEASUREMENTS",
-	META:          "META",
 	NAME:          "NAME",
-	NOT:           "NOT",
 	OFFSET:        "OFFSET",
 	ON:            "ON",
 	ORDER:         "ORDER",
@@ -242,8 +249,6 @@ var tokens = [...]string{
 	REVOKE:        "REVOKE",
 	SELECT:        "SELECT",
 	SERIES:        "SERIES",
-	SERVER:        "SERVER",
-	SERVERS:       "SERVERS",
 	SET:           "SET",
 	SHOW:          "SHOW",
 	SHARD:         "SHARD",
@@ -294,9 +299,9 @@ func (tok Token) Precedence() int {
 		return 2
 	case EQ, NEQ, EQREGEX, NEQREGEX, LT, LTE, GT, GTE:
 		return 3
-	case ADD, SUB:
+	case ADD, SUB, BITWISE_OR, BITWISE_XOR:
 		return 4
-	case MUL, DIV:
+	case MUL, DIV, MOD, BITWISE_AND:
 		return 5
 	}
 	return 0

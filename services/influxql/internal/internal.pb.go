@@ -3,22 +3,16 @@
 // DO NOT EDIT!
 
 /*
-Package internal is a generated protocol buffer package.
+Package influxql is a generated protocol buffer package.
 
 It is generated from these files:
 	internal/internal.proto
 
 It has these top-level messages:
-	Point
-	Aux
-	IteratorOptions
 	Measurements
 	Measurement
-	Interval
-	Series
-	SeriesList
 */
-package internal
+package influxql
 
 import proto "github.com/gogo/protobuf/proto"
 import fmt "fmt"
@@ -29,286 +23,21 @@ var _ = proto.Marshal
 var _ = fmt.Errorf
 var _ = math.Inf
 
-type Point struct {
-	Name             *string  `protobuf:"bytes,1,req,name=Name" json:"Name,omitempty"`
-	Tags             *string  `protobuf:"bytes,2,req,name=Tags" json:"Tags,omitempty"`
-	Time             *int64   `protobuf:"varint,3,req,name=Time" json:"Time,omitempty"`
-	Nil              *bool    `protobuf:"varint,4,req,name=Nil" json:"Nil,omitempty"`
-	Aux              []*Aux   `protobuf:"bytes,5,rep,name=Aux" json:"Aux,omitempty"`
-	Aggregated       *uint32  `protobuf:"varint,6,opt,name=Aggregated" json:"Aggregated,omitempty"`
-	FloatValue       *float64 `protobuf:"fixed64,7,opt,name=FloatValue" json:"FloatValue,omitempty"`
-	IntegerValue     *int64   `protobuf:"varint,8,opt,name=IntegerValue" json:"IntegerValue,omitempty"`
-	StringValue      *string  `protobuf:"bytes,9,opt,name=StringValue" json:"StringValue,omitempty"`
-	BooleanValue     *bool    `protobuf:"varint,10,opt,name=BooleanValue" json:"BooleanValue,omitempty"`
-	XXX_unrecognized []byte   `json:"-"`
-}
-
-func (m *Point) Reset()         { *m = Point{} }
-func (m *Point) String() string { return proto.CompactTextString(m) }
-func (*Point) ProtoMessage()    {}
-
-func (m *Point) GetName() string {
-	if m != nil && m.Name != nil {
-		return *m.Name
-	}
-	return ""
-}
-
-func (m *Point) GetTags() string {
-	if m != nil && m.Tags != nil {
-		return *m.Tags
-	}
-	return ""
-}
-
-func (m *Point) GetTime() int64 {
-	if m != nil && m.Time != nil {
-		return *m.Time
-	}
-	return 0
-}
-
-func (m *Point) GetNil() bool {
-	if m != nil && m.Nil != nil {
-		return *m.Nil
-	}
-	return false
-}
-
-func (m *Point) GetAux() []*Aux {
-	if m != nil {
-		return m.Aux
-	}
-	return nil
-}
-
-func (m *Point) GetAggregated() uint32 {
-	if m != nil && m.Aggregated != nil {
-		return *m.Aggregated
-	}
-	return 0
-}
-
-func (m *Point) GetFloatValue() float64 {
-	if m != nil && m.FloatValue != nil {
-		return *m.FloatValue
-	}
-	return 0
-}
-
-func (m *Point) GetIntegerValue() int64 {
-	if m != nil && m.IntegerValue != nil {
-		return *m.IntegerValue
-	}
-	return 0
-}
-
-func (m *Point) GetStringValue() string {
-	if m != nil && m.StringValue != nil {
-		return *m.StringValue
-	}
-	return ""
-}
-
-func (m *Point) GetBooleanValue() bool {
-	if m != nil && m.BooleanValue != nil {
-		return *m.BooleanValue
-	}
-	return false
-}
-
-type Aux struct {
-	DataType         *int32   `protobuf:"varint,1,req,name=DataType" json:"DataType,omitempty"`
-	FloatValue       *float64 `protobuf:"fixed64,2,opt,name=FloatValue" json:"FloatValue,omitempty"`
-	IntegerValue     *int64   `protobuf:"varint,3,opt,name=IntegerValue" json:"IntegerValue,omitempty"`
-	StringValue      *string  `protobuf:"bytes,4,opt,name=StringValue" json:"StringValue,omitempty"`
-	BooleanValue     *bool    `protobuf:"varint,5,opt,name=BooleanValue" json:"BooleanValue,omitempty"`
-	XXX_unrecognized []byte   `json:"-"`
-}
-
-func (m *Aux) Reset()         { *m = Aux{} }
-func (m *Aux) String() string { return proto.CompactTextString(m) }
-func (*Aux) ProtoMessage()    {}
-
-func (m *Aux) GetDataType() int32 {
-	if m != nil && m.DataType != nil {
-		return *m.DataType
-	}
-	return 0
-}
-
-func (m *Aux) GetFloatValue() float64 {
-	if m != nil && m.FloatValue != nil {
-		return *m.FloatValue
-	}
-	return 0
-}
-
-func (m *Aux) GetIntegerValue() int64 {
-	if m != nil && m.IntegerValue != nil {
-		return *m.IntegerValue
-	}
-	return 0
-}
-
-func (m *Aux) GetStringValue() string {
-	if m != nil && m.StringValue != nil {
-		return *m.StringValue
-	}
-	return ""
-}
-
-func (m *Aux) GetBooleanValue() bool {
-	if m != nil && m.BooleanValue != nil {
-		return *m.BooleanValue
-	}
-	return false
-}
-
-type IteratorOptions struct {
-	Expr             *string        `protobuf:"bytes,1,opt,name=Expr" json:"Expr,omitempty"`
-	Aux              []string       `protobuf:"bytes,2,rep,name=Aux" json:"Aux,omitempty"`
-	Sources          []*Measurement `protobuf:"bytes,3,rep,name=Sources" json:"Sources,omitempty"`
-	Interval         *Interval      `protobuf:"bytes,4,opt,name=Interval" json:"Interval,omitempty"`
-	Dimensions       []string       `protobuf:"bytes,5,rep,name=Dimensions" json:"Dimensions,omitempty"`
-	Fill             *int32         `protobuf:"varint,6,opt,name=Fill" json:"Fill,omitempty"`
-	FillValue        *float64       `protobuf:"fixed64,7,opt,name=FillValue" json:"FillValue,omitempty"`
-	Condition        *string        `protobuf:"bytes,8,opt,name=Condition" json:"Condition,omitempty"`
-	StartTime        *int64         `protobuf:"varint,9,opt,name=StartTime" json:"StartTime,omitempty"`
-	EndTime          *int64         `protobuf:"varint,10,opt,name=EndTime" json:"EndTime,omitempty"`
-	Ascending        *bool          `protobuf:"varint,11,opt,name=Ascending" json:"Ascending,omitempty"`
-	Limit            *int64         `protobuf:"varint,12,opt,name=Limit" json:"Limit,omitempty"`
-	Offset           *int64         `protobuf:"varint,13,opt,name=Offset" json:"Offset,omitempty"`
-	SLimit           *int64         `protobuf:"varint,14,opt,name=SLimit" json:"SLimit,omitempty"`
-	SOffset          *int64         `protobuf:"varint,15,opt,name=SOffset" json:"SOffset,omitempty"`
-	Dedupe           *bool          `protobuf:"varint,16,opt,name=Dedupe" json:"Dedupe,omitempty"`
-	XXX_unrecognized []byte         `json:"-"`
-}
-
-func (m *IteratorOptions) Reset()         { *m = IteratorOptions{} }
-func (m *IteratorOptions) String() string { return proto.CompactTextString(m) }
-func (*IteratorOptions) ProtoMessage()    {}
-
-func (m *IteratorOptions) GetExpr() string {
-	if m != nil && m.Expr != nil {
-		return *m.Expr
-	}
-	return ""
-}
-
-func (m *IteratorOptions) GetAux() []string {
-	if m != nil {
-		return m.Aux
-	}
-	return nil
-}
-
-func (m *IteratorOptions) GetSources() []*Measurement {
-	if m != nil {
-		return m.Sources
-	}
-	return nil
-}
-
-func (m *IteratorOptions) GetInterval() *Interval {
-	if m != nil {
-		return m.Interval
-	}
-	return nil
-}
-
-func (m *IteratorOptions) GetDimensions() []string {
-	if m != nil {
-		return m.Dimensions
-	}
-	return nil
-}
-
-func (m *IteratorOptions) GetFill() int32 {
-	if m != nil && m.Fill != nil {
-		return *m.Fill
-	}
-	return 0
-}
-
-func (m *IteratorOptions) GetFillValue() float64 {
-	if m != nil && m.FillValue != nil {
-		return *m.FillValue
-	}
-	return 0
-}
-
-func (m *IteratorOptions) GetCondition() string {
-	if m != nil && m.Condition != nil {
-		return *m.Condition
-	}
-	return ""
-}
-
-func (m *IteratorOptions) GetStartTime() int64 {
-	if m != nil && m.StartTime != nil {
-		return *m.StartTime
-	}
-	return 0
-}
-
-func (m *IteratorOptions) GetEndTime() int64 {
-	if m != nil && m.EndTime != nil {
-		return *m.EndTime
-	}
-	return 0
-}
-
-func (m *IteratorOptions) GetAscending() bool {
-	if m != nil && m.Ascending != nil {
-		return *m.Ascending
-	}
-	return false
-}
-
-func (m *IteratorOptions) GetLimit() int64 {
-	if m != nil && m.Limit != nil {
-		return *m.Limit
-	}
-	return 0
-}
-
-func (m *IteratorOptions) GetOffset() int64 {
-	if m != nil && m.Offset != nil {
-		return *m.Offset
-	}
-	return 0
-}
-
-func (m *IteratorOptions) GetSLimit() int64 {
-	if m != nil && m.SLimit != nil {
-		return *m.SLimit
-	}
-	return 0
-}
-
-func (m *IteratorOptions) GetSOffset() int64 {
-	if m != nil && m.SOffset != nil {
-		return *m.SOffset
-	}
-	return 0
-}
-
-func (m *IteratorOptions) GetDedupe() bool {
-	if m != nil && m.Dedupe != nil {
-		return *m.Dedupe
-	}
-	return false
-}
+// This is a compile-time assertion to ensure that this generated file
+// is compatible with the proto package it is being compiled against.
+// A compilation error at this line likely means your copy of the
+// proto package needs to be updated.
+const _ = proto.GoGoProtoPackageIsVersion2 // please upgrade the proto package
 
 type Measurements struct {
 	Items            []*Measurement `protobuf:"bytes,1,rep,name=Items" json:"Items,omitempty"`
 	XXX_unrecognized []byte         `json:"-"`
 }
 
-func (m *Measurements) Reset()         { *m = Measurements{} }
-func (m *Measurements) String() string { return proto.CompactTextString(m) }
-func (*Measurements) ProtoMessage()    {}
+func (m *Measurements) Reset()                    { *m = Measurements{} }
+func (m *Measurements) String() string            { return proto.CompactTextString(m) }
+func (*Measurements) ProtoMessage()               {}
+func (*Measurements) Descriptor() ([]byte, []int) { return fileDescriptorInternal, []int{0} }
 
 func (m *Measurements) GetItems() []*Measurement {
 	if m != nil {
@@ -326,9 +55,10 @@ type Measurement struct {
 	XXX_unrecognized []byte  `json:"-"`
 }
 
-func (m *Measurement) Reset()         { *m = Measurement{} }
-func (m *Measurement) String() string { return proto.CompactTextString(m) }
-func (*Measurement) ProtoMessage()    {}
+func (m *Measurement) Reset()                    { *m = Measurement{} }
+func (m *Measurement) String() string            { return proto.CompactTextString(m) }
+func (*Measurement) ProtoMessage()               {}
+func (*Measurement) Descriptor() ([]byte, []int) { return fileDescriptorInternal, []int{1} }
 
 func (m *Measurement) GetDatabase() string {
 	if m != nil && m.Database != nil {
@@ -365,85 +95,26 @@ func (m *Measurement) GetIsTarget() bool {
 	return false
 }
 
-type Interval struct {
-	Duration         *int64 `protobuf:"varint,1,opt,name=Duration" json:"Duration,omitempty"`
-	Offset           *int64 `protobuf:"varint,2,opt,name=Offset" json:"Offset,omitempty"`
-	XXX_unrecognized []byte `json:"-"`
-}
-
-func (m *Interval) Reset()         { *m = Interval{} }
-func (m *Interval) String() string { return proto.CompactTextString(m) }
-func (*Interval) ProtoMessage()    {}
-
-func (m *Interval) GetDuration() int64 {
-	if m != nil && m.Duration != nil {
-		return *m.Duration
-	}
-	return 0
-}
-
-func (m *Interval) GetOffset() int64 {
-	if m != nil && m.Offset != nil {
-		return *m.Offset
-	}
-	return 0
-}
-
-type Series struct {
-	Name             *string  `protobuf:"bytes,1,opt,name=Name" json:"Name,omitempty"`
-	Tags             []byte   `protobuf:"bytes,2,opt,name=Tags" json:"Tags,omitempty"`
-	Aux              []uint32 `protobuf:"varint,3,rep,name=Aux" json:"Aux,omitempty"`
-	XXX_unrecognized []byte   `json:"-"`
-}
-
-func (m *Series) Reset()         { *m = Series{} }
-func (m *Series) String() string { return proto.CompactTextString(m) }
-func (*Series) ProtoMessage()    {}
-
-func (m *Series) GetName() string {
-	if m != nil && m.Name != nil {
-		return *m.Name
-	}
-	return ""
-}
-
-func (m *Series) GetTags() []byte {
-	if m != nil {
-		return m.Tags
-	}
-	return nil
-}
-
-func (m *Series) GetAux() []uint32 {
-	if m != nil {
-		return m.Aux
-	}
-	return nil
-}
-
-type SeriesList struct {
-	Items            []*Series `protobuf:"bytes,1,rep,name=Items" json:"Items,omitempty"`
-	XXX_unrecognized []byte    `json:"-"`
-}
-
-func (m *SeriesList) Reset()         { *m = SeriesList{} }
-func (m *SeriesList) String() string { return proto.CompactTextString(m) }
-func (*SeriesList) ProtoMessage()    {}
-
-func (m *SeriesList) GetItems() []*Series {
-	if m != nil {
-		return m.Items
-	}
-	return nil
-}
-
 func init() {
-	proto.RegisterType((*Point)(nil), "internal.Point")
-	proto.RegisterType((*Aux)(nil), "internal.Aux")
-	proto.RegisterType((*IteratorOptions)(nil), "internal.IteratorOptions")
-	proto.RegisterType((*Measurements)(nil), "internal.Measurements")
-	proto.RegisterType((*Measurement)(nil), "internal.Measurement")
-	proto.RegisterType((*Interval)(nil), "internal.Interval")
-	proto.RegisterType((*Series)(nil), "internal.Series")
-	proto.RegisterType((*SeriesList)(nil), "internal.SeriesList")
+	proto.RegisterType((*Measurements)(nil), "influxql.Measurements")
+	proto.RegisterType((*Measurement)(nil), "influxql.Measurement")
+}
+
+func init() { proto.RegisterFile("internal/internal.proto", fileDescriptorInternal) }
+
+var fileDescriptorInternal = []byte{
+	// 195 bytes of a gzipped FileDescriptorProto
+	0x1f, 0x8b, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02, 0xff, 0xe2, 0x12, 0xcf, 0xcc, 0x2b, 0x49,
+	0x2d, 0xca, 0x4b, 0xcc, 0xd1, 0x87, 0x31, 0xf4, 0x0a, 0x8a, 0xf2, 0x4b, 0xf2, 0x85, 0x38, 0x32,
+	0xf3, 0xd2, 0x72, 0x4a, 0x2b, 0x0a, 0x73, 0x94, 0xac, 0xb9, 0x78, 0x7c, 0x53, 0x13, 0x8b, 0x4b,
+	0x8b, 0x52, 0x73, 0x53, 0xf3, 0x4a, 0x8a, 0x85, 0xb4, 0xb9, 0x58, 0x3d, 0x4b, 0x52, 0x73, 0x8b,
+	0x25, 0x18, 0x15, 0x98, 0x35, 0xb8, 0x8d, 0x44, 0xf5, 0x60, 0x2a, 0xf5, 0x90, 0x94, 0x05, 0x41,
+	0xd4, 0x28, 0xcd, 0x64, 0xe4, 0xe2, 0x46, 0x12, 0x16, 0x92, 0xe2, 0xe2, 0x70, 0x49, 0x2c, 0x49,
+	0x4c, 0x4a, 0x2c, 0x4e, 0x95, 0x60, 0x54, 0x60, 0xd4, 0xe0, 0x0c, 0x82, 0xf3, 0x85, 0x34, 0xb8,
+	0xf8, 0x83, 0x52, 0x4b, 0x52, 0xf3, 0x4a, 0x32, 0xf3, 0xf3, 0x02, 0xf2, 0x73, 0x32, 0x93, 0x2b,
+	0x25, 0x98, 0xc0, 0x4a, 0xd0, 0x85, 0x85, 0x84, 0xb8, 0x58, 0xfc, 0x12, 0x73, 0x53, 0x25, 0x98,
+	0xc1, 0xd2, 0x60, 0xb6, 0x90, 0x08, 0x17, 0x6b, 0x50, 0x6a, 0x7a, 0x6a, 0x85, 0x04, 0x0b, 0x58,
+	0x10, 0xc2, 0x01, 0xd9, 0xe7, 0x59, 0x1c, 0x92, 0x58, 0x94, 0x9e, 0x5a, 0x22, 0xc1, 0xaa, 0xc0,
+	0xa8, 0xc1, 0x11, 0x04, 0xe7, 0x03, 0x02, 0x00, 0x00, 0xff, 0xff, 0xb8, 0x16, 0x06, 0x23, 0xfc,
+	0x00, 0x00, 0x00,
 }

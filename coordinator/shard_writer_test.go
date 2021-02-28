@@ -15,7 +15,7 @@ import (
 func TestShardWriter_WriteShard_Success(t *testing.T) {
 	ts := newTestWriteService(nil)
 	ts.TSDBStore.WriteToShardFn = ts.writeShardSuccess
-	s := cluster.NewService(cluster.Config{})
+	s := coordinator.NewService(coordinator.Config{})
 	s.Listener = ts.muxln
 	s.TSDBStore = &ts.TSDBStore
 	if err := s.Open(); err != nil {
@@ -24,7 +24,7 @@ func TestShardWriter_WriteShard_Success(t *testing.T) {
 	defer s.Close()
 	defer ts.Close()
 
-	w := cluster.NewShardWriter(time.Minute, 1)
+	w := coordinator.NewShardWriter(time.Minute, 1)
 	w.MetaClient = &metaClient{host: ts.ln.Addr().String()}
 
 	// Build a single point.
@@ -63,7 +63,7 @@ func TestShardWriter_WriteShard_Success(t *testing.T) {
 func TestShardWriter_WriteShard_Multiple(t *testing.T) {
 	ts := newTestWriteService(nil)
 	ts.TSDBStore.WriteToShardFn = ts.writeShardSuccess
-	s := cluster.NewService(cluster.Config{})
+	s := coordinator.NewService(coordinator.Config{})
 	s.Listener = ts.muxln
 	s.TSDBStore = &ts.TSDBStore
 	if err := s.Open(); err != nil {
@@ -72,7 +72,7 @@ func TestShardWriter_WriteShard_Multiple(t *testing.T) {
 	defer s.Close()
 	defer ts.Close()
 
-	w := cluster.NewShardWriter(time.Minute, 1)
+	w := coordinator.NewShardWriter(time.Minute, 1)
 	w.MetaClient = &metaClient{host: ts.ln.Addr().String()}
 
 	// Build a single point.
@@ -112,7 +112,7 @@ func TestShardWriter_WriteShard_Multiple(t *testing.T) {
 // Ensure the shard writer returns an error when the server fails to accept the write.
 func TestShardWriter_WriteShard_Error(t *testing.T) {
 	ts := newTestWriteService(writeShardFail)
-	s := cluster.NewService(cluster.Config{})
+	s := coordinator.NewService(coordinator.Config{})
 	s.Listener = ts.muxln
 	s.TSDBStore = &ts.TSDBStore
 	if err := s.Open(); err != nil {
@@ -121,7 +121,7 @@ func TestShardWriter_WriteShard_Error(t *testing.T) {
 	defer s.Close()
 	defer ts.Close()
 
-	w := cluster.NewShardWriter(time.Minute, 1)
+	w := coordinator.NewShardWriter(time.Minute, 1)
 	w.MetaClient = &metaClient{host: ts.ln.Addr().String()}
 	now := time.Now()
 
@@ -141,7 +141,7 @@ func TestShardWriter_WriteShard_Error(t *testing.T) {
 func TestShardWriter_Write_ErrDialTimeout(t *testing.T) {
 	ts := newTestWriteService(nil)
 	ts.TSDBStore.WriteToShardFn = ts.writeShardSuccess
-	s := cluster.NewService(cluster.Config{})
+	s := coordinator.NewService(coordinator.Config{})
 	s.Listener = ts.muxln
 	s.TSDBStore = &ts.TSDBStore
 	if err := s.Open(); err != nil {
@@ -151,7 +151,7 @@ func TestShardWriter_Write_ErrDialTimeout(t *testing.T) {
 	defer ts.Close()
 
 	// Zero timeout set to support all platforms.
-	w := cluster.NewShardWriter(0, 1)
+	w := coordinator.NewShardWriter(0, 1)
 	w.MetaClient = &metaClient{host: ts.ln.Addr().String()}
 	now := time.Now()
 
@@ -175,7 +175,7 @@ func TestShardWriter_Write_ErrReadTimeout(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	w := cluster.NewShardWriter(time.Millisecond, 1)
+	w := coordinator.NewShardWriter(time.Millisecond, 1)
 	w.MetaClient = &metaClient{host: ln.Addr().String()}
 	now := time.Now()
 
@@ -194,7 +194,7 @@ func TestShardWriter_Write_ErrReadTimeout(t *testing.T) {
 // Ensure the shard writer returns an error when we can't get a connection.
 func TestShardWriter_Write_PoolMax(t *testing.T) {
 	ts := newTestWriteService(writeShardSlow)
-	s := cluster.NewService(cluster.Config{
+	s := coordinator.NewService(coordinator.Config{
 		ShardWriterTimeout: toml.Duration(100 * time.Millisecond),
 	})
 	s.Listener = ts.muxln
@@ -205,7 +205,7 @@ func TestShardWriter_Write_PoolMax(t *testing.T) {
 	defer s.Close()
 	defer ts.Close()
 
-	w := cluster.NewShardWriter(100*time.Millisecond, 1)
+	w := coordinator.NewShardWriter(100*time.Millisecond, 1)
 	w.MetaClient = &metaClient{host: ts.ln.Addr().String()}
 	now := time.Now()
 

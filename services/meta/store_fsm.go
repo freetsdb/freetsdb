@@ -214,7 +214,7 @@ func (fsm *storeFSM) applyCreateDatabaseCommand(cmd *internal.Command) interface
 			ReplicaN:           int(rpi.GetReplicaN()),
 			Duration:           time.Duration(rpi.GetDuration()),
 			ShardGroupDuration: time.Duration(rpi.GetShardGroupDuration()),
-		}); err != nil {
+		}, false); err != nil {
 			if err == ErrRetentionPolicyExists {
 				return ErrRetentionPolicyConflict
 			}
@@ -239,7 +239,7 @@ func (fsm *storeFSM) applyCreateDatabaseCommand(cmd *internal.Command) interface
 		rpi := NewRetentionPolicyInfo(autoCreateRetentionPolicyName)
 		rpi.ReplicaN = replicaN
 		rpi.Duration = autoCreateRetentionPolicyPeriod
-		if err := other.CreateRetentionPolicy(v.GetName(), rpi); err != nil {
+		if err := other.CreateRetentionPolicy(v.GetName(), rpi, false); err != nil {
 			return err
 		}
 
@@ -281,7 +281,7 @@ func (fsm *storeFSM) applyCreateRetentionPolicyCommand(cmd *internal.Command) in
 			ReplicaN:           int(pb.GetReplicaN()),
 			Duration:           time.Duration(pb.GetDuration()),
 			ShardGroupDuration: time.Duration(pb.GetShardGroupDuration()),
-		}); err != nil {
+		}, false); err != nil {
 		return err
 	}
 	fsm.data = other
@@ -334,7 +334,7 @@ func (fsm *storeFSM) applyUpdateRetentionPolicyCommand(cmd *internal.Command) in
 
 	// Copy data and update.
 	other := fsm.data.Clone()
-	if err := other.UpdateRetentionPolicy(v.GetDatabase(), v.GetName(), &rpu); err != nil {
+	if err := other.UpdateRetentionPolicy(v.GetDatabase(), v.GetName(), &rpu, false); err != nil {
 		return err
 	}
 	fsm.data = other

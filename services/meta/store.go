@@ -25,7 +25,7 @@ const (
 
 	// maxAutoCreatedRetentionPolicyReplicaN is the maximum replication factor that will
 	// be set for auto-created retention policies.
-	maxAutoCreatedRetentionPolicyReplicaN = 3
+	maxAutoCreatedRetentionPolicyReplicaN = 1
 )
 
 // Raft configuration.
@@ -410,6 +410,7 @@ func (s *store) joinCluster(peers []string) (*NodeInfo, error) {
 		if err != nil {
 			return nil, err
 		}
+
 		s.node.ID = n.ID
 		if err := s.node.Save(); err != nil {
 			return nil, err

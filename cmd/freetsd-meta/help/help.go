@@ -1,3 +1,4 @@
+// Package help is the help subcommand of the freetsd-meta command.
 package help
 
 import (
@@ -26,21 +27,24 @@ func (cmd *Command) Run(args ...string) error {
 }
 
 const usage = `
-Configure and start an FreeTSDB server.
+usage: freetsd-meta [flags]
 
-Usage:
+FreeTSDB Meta is a raft-based meta service for FreeTSDB.
 
-	freetsd [[command] [arguments]]
+Options:
+	-config <path>       Set the path to the configuration file.
 
-The commands are:
+	-single-server       Start the server in single server mode.  This
+	                     will trigger an election.  If you are starting
+	                     multiple nodes to form a cluster, this option
+	                     should not be used.
 
-    backup               downloads a snapshot of a data node and saves it to disk
-    config               display the default configuration
-    restore              uses a snapshot of a data node to rebuild a cluster
-    run                  run node with existing configuration
-    version              displays the FreeTSDB version
+	-hostname <name>     Override the hostname, the 'hostname' configuration
+	                     option will be overridden.
 
-"run" is the default command.
+	-pidfile <path>      Write process ID to a file.
 
-Use "freetsd help [command]" for more information about a command.
+	-cpuprofile <path>   Write CPU profiling information to a file.
+
+	-memprofile <path>   Write memory usage information to a file.
 `

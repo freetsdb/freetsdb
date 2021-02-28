@@ -101,9 +101,6 @@ func NewService() *Service {
 	}
 	s.Service.TSDBStore = &s.TSDBStore
 
-	if !testing.Verbose() {
-		s.SetLogger(log.New(ioutil.Discard, "", 0))
-	}
 	return s
 }
 

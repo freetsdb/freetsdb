@@ -1,5 +1,3 @@
-// Package escape contains utilities for escaping parts of InfluxQL
-// and FreeTSDB line protocol.
 package escape // import "github.com/freetsdb/freetsdb/pkg/escape"
 
 import (

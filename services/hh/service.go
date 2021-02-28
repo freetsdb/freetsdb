@@ -148,11 +148,6 @@ func (s *Service) Close() error {
 	return nil
 }
 
-// SetLogger sets the internal logger to the logger passed in.
-func (s *Service) SetLogger(l *log.Logger) {
-	s.Logger = l
-}
-
 // WriteShard queues the points write for shardID to node ownerID to handoff queue
 func (s *Service) WriteShard(shardID, ownerID uint64, points []models.Point) error {
 	if !s.cfg.Enabled {

@@ -1,14 +1,16 @@
 package coordinator
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
 
-	"github.com/gogo/protobuf/proto"
 	"github.com/freetsdb/freetsdb/coordinator/internal"
 	"github.com/freetsdb/freetsdb/models"
+	"github.com/freetsdb/freetsdb/query"
 	"github.com/freetsdb/freetsdb/services/influxql"
+	"github.com/gogo/protobuf/proto"
 )
 
 //go:generate protoc --gogo_out=. internal/data.proto
@@ -24,7 +26,7 @@ type WritePointsRequest struct {
 // AddPoint adds a point to the WritePointRequest with field key 'value'
 func (w *WritePointsRequest) AddPoint(name string, value interface{}, timestamp time.Time, tags map[string]string) {
 	pt, err := models.NewPoint(
-		name, tags, map[string]interface{}{"value": value}, timestamp,
+		name, models.NewTags(tags), map[string]interface{}{"value": value}, timestamp,
 	)
 	if err != nil {
 		return
@@ -62,7 +64,7 @@ func (w *WriteShardRequest) Points() []models.Point { return w.unmarshalPoints()
 // AddPoint adds a new time series point
 func (w *WriteShardRequest) AddPoint(name string, value interface{}, timestamp time.Time, tags map[string]string) {
 	pt, err := models.NewPoint(
-		name, tags, map[string]interface{}{"value": value}, timestamp,
+		name, models.NewTags(tags), map[string]interface{}{"value": value}, timestamp,
 	)
 	if err != nil {
 		return
@@ -155,7 +157,9 @@ func (r *ExecuteStatementRequest) SetStatement(statement string) {
 func (r *ExecuteStatementRequest) Database() string { return r.pb.GetDatabase() }
 
 // SetDatabase sets the database name.
-func (r *ExecuteStatementRequest) SetDatabase(database string) { r.pb.Database = proto.String(database) }
+func (r *ExecuteStatementRequest) SetDatabase(database string) {
+	r.pb.Database = proto.String(database)
+}
 
 // MarshalBinary encodes the object to a binary format.
 func (r *ExecuteStatementRequest) MarshalBinary() ([]byte, error) {
@@ -202,8 +206,9 @@ func (w *ExecuteStatementResponse) UnmarshalBinary(buf []byte) error {
 
 // CreateIteratorRequest represents a request to create a remote iterator.
 type CreateIteratorRequest struct {
-	ShardIDs []uint64
-	Opt      influxql.IteratorOptions
+	ShardIDs    []uint64
+	Measurement influxql.Measurement
+	Opt         query.IteratorOptions
 }
 
 // MarshalBinary encodes r to a binary format.
@@ -213,8 +218,11 @@ func (r *CreateIteratorRequest) MarshalBinary() ([]byte, error) {
 		return nil, err
 	}
 	return proto.Marshal(&internal.CreateIteratorRequest{
-		ShardIDs: r.ShardIDs,
-		Opt:      buf,
+		ShardIDs:        r.ShardIDs,
+		Database:        []byte(r.Measurement.Database),
+		RetentionPolicy: []byte(r.Measurement.RetentionPolicy),
+		MeasurementName: []byte(r.Measurement.Name),
+		Opt:             buf,
 	})
 }
 
@@ -226,6 +234,9 @@ func (r *CreateIteratorRequest) UnmarshalBinary(data []byte) error {
 	}
 
 	r.ShardIDs = pb.GetShardIDs()
+	r.Measurement.Database = string(pb.GetDatabase()[:])
+	r.Measurement.RetentionPolicy = string(pb.GetRetentionPolicy()[:])
+	r.Measurement.Name = string(pb.GetMeasurementName()[:])
 	if err := r.Opt.UnmarshalBinary(pb.GetOpt()); err != nil {
 		return err
 	}
@@ -234,7 +245,9 @@ func (r *CreateIteratorRequest) UnmarshalBinary(data []byte) error {
 
 // CreateIteratorResponse represents a response from remote iterator creation.
 type CreateIteratorResponse struct {
-	Err error
+	Err   error
+	typ   influxql.DataType
+	stats query.IteratorStats
 }
 
 // MarshalBinary encodes r to a binary format.
@@ -243,6 +256,9 @@ func (r *CreateIteratorResponse) MarshalBinary() ([]byte, error) {
 	if r.Err != nil {
 		pb.Err = proto.String(r.Err.Error())
 	}
+	pb.DataType = proto.Int32(int32(r.typ))
+	pb.SeriesN = proto.Int32(int32(r.stats.SeriesN))
+	pb.PointN = proto.Int32(int32(r.stats.PointN))
 	return proto.Marshal(&pb)
 }
 
@@ -255,24 +271,27 @@ func (r *CreateIteratorResponse) UnmarshalBinary(data []byte) error {
 	if pb.Err != nil {
 		r.Err = errors.New(pb.GetErr())
 	}
+	r.typ = influxql.DataType(pb.GetDataType())
+	r.stats.SeriesN = int(pb.GetSeriesN())
+	r.stats.PointN = int(pb.GetPointN())
 	return nil
 }
 
 // FieldDimensionsRequest represents a request to retrieve unique fields & dimensions.
 type FieldDimensionsRequest struct {
-	ShardIDs []uint64
-	Sources  influxql.Sources
+	ShardIDs    []uint64
+	Measurement influxql.Measurement
 }
 
 // MarshalBinary encodes r to a binary format.
 func (r *FieldDimensionsRequest) MarshalBinary() ([]byte, error) {
-	buf, err := r.Sources.MarshalBinary()
+	buf, err := r.Measurement.MarshalBinary()
 	if err != nil {
 		return nil, err
 	}
 	return proto.Marshal(&internal.FieldDimensionsRequest{
-		ShardIDs: r.ShardIDs,
-		Sources:  buf,
+		ShardIDs:    r.ShardIDs,
+		Measurement: buf,
 	})
 }
 
@@ -284,15 +303,16 @@ func (r *FieldDimensionsRequest) UnmarshalBinary(data []byte) error {
 	}
 
 	r.ShardIDs = pb.GetShardIDs()
-	if err := r.Sources.UnmarshalBinary(pb.GetSources()); err != nil {
+	if err := r.Measurement.UnmarshalBinary(pb.GetMeasurement()); err != nil {
 		return err
 	}
+
 	return nil
 }
 
 // FieldDimensionsResponse represents a response from remote iterator creation.
 type FieldDimensionsResponse struct {
-	Fields     map[string]struct{}
+	Fields     map[string]influxql.DataType
 	Dimensions map[string]struct{}
 	Err        error
 }
@@ -301,10 +321,11 @@ type FieldDimensionsResponse struct {
 func (r *FieldDimensionsResponse) MarshalBinary() ([]byte, error) {
 	var pb internal.FieldDimensionsResponse
 
-	pb.Fields = make([]string, 0, len(r.Fields))
-	for k := range r.Fields {
-		pb.Fields = append(pb.Fields, k)
+	buf, err := json.Marshal(r.Fields)
+	if err != nil {
+		return nil, err
 	}
+	pb.Fields = buf[:]
 
 	pb.Dimensions = make([]string, 0, len(r.Dimensions))
 	for k := range r.Dimensions {
@@ -324,9 +345,9 @@ func (r *FieldDimensionsResponse) UnmarshalBinary(data []byte) error {
 		return err
 	}
 
-	r.Fields = make(map[string]struct{}, len(pb.GetFields()))
-	for _, s := range pb.GetFields() {
-		r.Fields[s] = struct{}{}
+	err := json.Unmarshal([]byte(pb.GetFields()), &r.Fields)
+	if err != nil {
+		return err
 	}
 
 	r.Dimensions = make(map[string]struct{}, len(pb.GetDimensions()))
@@ -337,77 +358,5 @@ func (r *FieldDimensionsResponse) UnmarshalBinary(data []byte) error {
 	if pb.Err != nil {
 		r.Err = errors.New(pb.GetErr())
 	}
-	return nil
-}
-
-// SeriesKeysRequest represents a request to retrieve a list of series keys.
-type SeriesKeysRequest struct {
-	ShardIDs []uint64
-	Opt      influxql.IteratorOptions
-}
-
-// MarshalBinary encodes r to a binary format.
-func (r *SeriesKeysRequest) MarshalBinary() ([]byte, error) {
-	buf, err := r.Opt.MarshalBinary()
-	if err != nil {
-		return nil, err
-	}
-	return proto.Marshal(&internal.SeriesKeysRequest{
-		ShardIDs: r.ShardIDs,
-		Opt:      buf,
-	})
-}
-
-// UnmarshalBinary decodes data into r.
-func (r *SeriesKeysRequest) UnmarshalBinary(data []byte) error {
-	var pb internal.SeriesKeysRequest
-	if err := proto.Unmarshal(data, &pb); err != nil {
-		return err
-	}
-
-	r.ShardIDs = pb.GetShardIDs()
-	if err := r.Opt.UnmarshalBinary(pb.GetOpt()); err != nil {
-		return err
-	}
-	return nil
-}
-
-// SeriesKeysResponse represents a response from retrieving series keys.
-type SeriesKeysResponse struct {
-	SeriesList influxql.SeriesList
-	Err        error
-}
-
-// MarshalBinary encodes r to a binary format.
-func (r *SeriesKeysResponse) MarshalBinary() ([]byte, error) {
-	var pb internal.SeriesKeysResponse
-
-	buf, err := r.SeriesList.MarshalBinary()
-	if err != nil {
-		return nil, err
-	}
-	pb.SeriesList = buf
-
-	if r.Err != nil {
-		pb.Err = proto.String(r.Err.Error())
-	}
-	return proto.Marshal(&pb)
-}
-
-// UnmarshalBinary decodes data into r.
-func (r *SeriesKeysResponse) UnmarshalBinary(data []byte) error {
-	var pb internal.SeriesKeysResponse
-	if err := proto.Unmarshal(data, &pb); err != nil {
-		return err
-	}
-
-	if err := r.SeriesList.UnmarshalBinary(pb.GetSeriesList()); err != nil {
-		return err
-	}
-
-	if pb.Err != nil {
-		r.Err = errors.New(pb.GetErr())
-	}
-
 	return nil
 }

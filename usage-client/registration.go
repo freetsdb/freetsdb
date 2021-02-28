@@ -10,7 +10,7 @@ import (
 // Process.
 type Registration struct {
 	ClusterID string
-	Product   string // freetsdb, chronograf, telegraf, kapicator
+	Product   string // freetsdb
 	// OPTIONAL: Enterprise will redirect the customer back to the
 	// RedirectURL if it is specified.
 	RedirectURL string

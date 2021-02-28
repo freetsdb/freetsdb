@@ -42,13 +42,4 @@ message FieldDimensionsResponse {
     optional string Err        = 3;
 }
 
-message SeriesKeysRequest {
-    repeated uint64 ShardIDs = 1;
-    required bytes  Opt      = 2;
-}
-
-message SeriesKeysResponse {
-    optional bytes  SeriesList = 1;
-    optional string Err        = 2;
-}
 

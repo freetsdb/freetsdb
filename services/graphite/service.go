@@ -1,28 +1,26 @@
+// Package graphite provides a service for FreeTSDB to ingest data via the graphite protocol.
 package graphite // import "github.com/freetsdb/freetsdb/services/graphite"
 
 import (
 	"bufio"
-	"expvar"
 	"fmt"
 	"math"
 	"net"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
-	"github.com/freetsdb/freetsdb"
 	"github.com/freetsdb/freetsdb/coordinator"
 	"github.com/freetsdb/freetsdb/logger"
+	"github.com/freetsdb/freetsdb/models"
 	"github.com/freetsdb/freetsdb/monitor/diagnostics"
 	"github.com/freetsdb/freetsdb/services/meta"
 	"github.com/freetsdb/freetsdb/tsdb"
 	"go.uber.org/zap"
 )
 
-const (
-	udpBufferSize     = 65536
-	leaderWaitTimeout = 30 * time.Second
-)
+const udpBufferSize = 65536
 
 // statistics gathered by the graphite package.
 const (
@@ -30,7 +28,6 @@ const (
 	statBytesReceived       = "bytesRx"
 	statPointsParseFail     = "pointsParseFail"
 	statPointsNaNFail       = "pointsNaNFail"
-	statPointsUnsupported   = "pointsUnsupportedFail"
 	statBatchesTransmitted  = "batchesTx"
 	statPointsTransmitted   = "pointsTx"
 	statBatchesTransmitFail = "batchesTxFail"
@@ -49,22 +46,22 @@ func (c *tcpConnection) Close() {
 
 // Service represents a Graphite service.
 type Service struct {
-	mu sync.Mutex
-
-	bindAddress      string
-	database         string
-	protocol         string
-	batchSize        int
-	batchPending     int
-	batchTimeout     time.Duration
-	consistencyLevel coordinator.ConsistencyLevel
-	udpReadBuffer    int
+	bindAddress     string
+	database        string
+	retentionPolicy string
+	protocol        string
+	batchSize       int
+	batchPending    int
+	batchTimeout    time.Duration
+	udpReadBuffer   int
 
 	batcher *tsdb.PointBatcher
 	parser  *Parser
 
-	logger           *zap.Logger
-	statMap          *expvar.Map
+	logger      *zap.Logger
+	stats       *Statistics
+	defaultTags models.StatisticTags
+
 	tcpConnectionsMu sync.Mutex
 	tcpConnections   map[string]*tcpConnection
 	diagsKey         string
@@ -73,18 +70,25 @@ type Service struct {
 	addr    net.Addr
 	udpConn *net.UDPConn
 
-	wg   sync.WaitGroup
-	done chan struct{}
+	wg sync.WaitGroup
+
+	mu    sync.RWMutex
+	ready bool          // Has the required database been created?
+	done  chan struct{} // Is the service closing or closed?
 
 	Monitor interface {
 		RegisterDiagnosticsClient(name string, client diagnostics.Client)
 		DeregisterDiagnosticsClient(name string)
 	}
 	PointsWriter interface {
-		WritePoints(p *coordinator.WritePointsRequest) error
+		WritePointsPrivileged(database, retentionPolicy string, consistencyLevel coordinator.ConsistencyLevel, points []models.Point) error
 	}
 	MetaClient interface {
-		CreateDatabase(name string) (*meta.DatabaseInfo, error)
+		CreateDatabaseWithRetentionPolicy(name string, rpi *meta.RetentionPolicyInfo) (*meta.DatabaseInfo, error)
+		CreateRetentionPolicy(database string, rpi *meta.RetentionPolicyInfo) (*meta.RetentionPolicyInfo, error)
+		Database(name string) *meta.DatabaseInfo
+		RetentionPolicy(database, name string) (*meta.RetentionPolicyInfo, error)
+		SetDefaultRetentionPolicy(database, name string) error
 	}
 }
 
@@ -94,24 +98,20 @@ func NewService(c Config) (*Service, error) {
 	d := c.WithDefaults()
 
 	s := Service{
-		bindAddress:    d.BindAddress,
-		database:       d.Database,
-		protocol:       d.Protocol,
-		batchSize:      d.BatchSize,
-		batchPending:   d.BatchPending,
-		udpReadBuffer:  d.UDPReadBuffer,
-		batchTimeout:   time.Duration(d.BatchTimeout),
-		logger:         zap.NewNop(),
-		tcpConnections: make(map[string]*tcpConnection),
-		done:           make(chan struct{}),
-		diagsKey:       strings.Join([]string{"graphite", d.Protocol, d.BindAddress}, ":"),
+		bindAddress:     d.BindAddress,
+		database:        d.Database,
+		retentionPolicy: d.RetentionPolicy,
+		protocol:        d.Protocol,
+		batchSize:       d.BatchSize,
+		batchPending:    d.BatchPending,
+		udpReadBuffer:   d.UDPReadBuffer,
+		batchTimeout:    time.Duration(d.BatchTimeout),
+		logger:          zap.NewNop(),
+		stats:           &Statistics{},
+		defaultTags:     models.StatisticTags{"proto": d.Protocol, "bind": d.BindAddress},
+		tcpConnections:  make(map[string]*tcpConnection),
+		diagsKey:        strings.Join([]string{"graphite", d.Protocol, d.BindAddress}, ":"),
 	}
-
-	consistencyLevel, err := coordinator.ParseConsistencyLevel(d.ConsistencyLevel)
-	if err != nil {
-		return nil, err
-	}
-	s.consistencyLevel = consistencyLevel
 
 	parser, err := NewParserWithOptions(Options{
 		Templates:   d.Templates,
@@ -131,25 +131,18 @@ func (s *Service) Open() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	if s.done != nil {
+		return nil // Already open.
+	}
+	s.done = make(chan struct{})
+
 	s.logger.Info("Starting graphite service",
 		zap.Int("batch_size", s.batchSize),
 		logger.DurationLiteral("batch_timeout", s.batchTimeout))
 
-	// Configure expvar monitoring. It's OK to do this even if the service fails to open and
-	// should be done before any data could arrive for the service.
-	tags := map[string]string{"proto": s.protocol, "bind": s.bindAddress}
-	s.statMap = freetsdb.NewStatistics(s.diagsKey, "graphite", tags)
-
 	// Register diagnostics if a Monitor service is available.
 	if s.Monitor != nil {
 		s.Monitor.RegisterDiagnosticsClient(s.diagsKey, s)
-	}
-
-	if _, err := s.MetaClient.CreateDatabase(s.database); err != nil {
-		s.logger.Info("Failed to ensure target database",
-			logger.Database(s.database),
-			zap.Error(err))
-		return err
 	}
 
 	s.batcher = tsdb.NewPointBatcher(s.batchSize, s.batchPending, s.batchTimeout)
@@ -171,11 +164,12 @@ func (s *Service) Open() error {
 		return err
 	}
 
-	s.logger.Info("Listening on",
-		zap.String("protocol", strings.ToUpper(s.protocol)),
+	s.logger.Info("Listening",
+		zap.String("protocol", s.protocol),
 		zap.Stringer("addr", s.addr))
 	return nil
 }
+
 func (s *Service) closeAllConnections() {
 	s.tcpConnectionsMu.Lock()
 	defer s.tcpConnectionsMu.Unlock()
@@ -186,36 +180,134 @@ func (s *Service) closeAllConnections() {
 
 // Close stops all data processing on the Graphite input.
 func (s *Service) Close() error {
+	if wait := func() bool {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+
+		if s.closed() {
+			return false
+		}
+		close(s.done)
+
+		s.closeAllConnections()
+
+		if s.ln != nil {
+			s.ln.Close()
+		}
+		if s.udpConn != nil {
+			s.udpConn.Close()
+		}
+
+		if s.batcher != nil {
+			s.batcher.Stop()
+		}
+
+		if s.Monitor != nil {
+			s.Monitor.DeregisterDiagnosticsClient(s.diagsKey)
+		}
+		return true
+	}(); !wait {
+		return nil // Already closed.
+	}
+
+	s.wg.Wait()
+
+	s.mu.Lock()
+	s.done = nil
+	s.mu.Unlock()
+
+	return nil
+}
+
+// Closed returns true if the service is currently closed.
+func (s *Service) Closed() bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	return s.closed()
+}
 
-	s.closeAllConnections()
-
-	if s.ln != nil {
-		s.ln.Close()
+func (s *Service) closed() bool {
+	select {
+	case <-s.done:
+		// Service is closing.
+		return true
+	default:
 	}
-	if s.udpConn != nil {
-		s.udpConn.Close()
+	return s.done == nil
+}
+
+// createInternalStorage ensures that the required database has been created.
+func (s *Service) createInternalStorage() error {
+	s.mu.RLock()
+	ready := s.ready
+	s.mu.RUnlock()
+	if ready {
+		return nil
 	}
 
-	if s.batcher != nil {
-		s.batcher.Stop()
+	if db := s.MetaClient.Database(s.database); db != nil {
+		if rp, _ := s.MetaClient.RetentionPolicy(s.database, s.retentionPolicy); rp == nil {
+			rpi := meta.RetentionPolicyInfo{Name: s.retentionPolicy}
+			if _, err := s.MetaClient.CreateRetentionPolicy(s.database, &rpi); err != nil {
+				return err
+			}
+			if err := s.MetaClient.SetDefaultRetentionPolicy(s.database, s.retentionPolicy); err != nil {
+				return err
+			}
+
+		}
+	} else {
+		rpi := meta.RetentionPolicyInfo{Name: s.retentionPolicy}
+		if _, err := s.MetaClient.CreateDatabaseWithRetentionPolicy(s.database, &rpi); err != nil {
+			return err
+		}
 	}
 
-	if s.Monitor != nil {
-		s.Monitor.DeregisterDiagnosticsClient(s.diagsKey)
-	}
-
-	close(s.done)
-	s.wg.Wait()
-	s.done = nil
-
+	// The service is now ready.
+	s.mu.Lock()
+	s.ready = true
+	s.mu.Unlock()
 	return nil
 }
 
 // WithLogger sets the logger on the service.
 func (s *Service) WithLogger(log *zap.Logger) {
-	s.logger = log.With(zap.String("service", "graphite"))
+	s.logger = log.With(
+		zap.String("service", "graphite"),
+		zap.String("addr", s.bindAddress),
+	)
+}
+
+// Statistics maintains statistics for the graphite service.
+type Statistics struct {
+	PointsReceived      int64
+	BytesReceived       int64
+	PointsParseFail     int64
+	PointsNaNFail       int64
+	BatchesTransmitted  int64
+	PointsTransmitted   int64
+	BatchesTransmitFail int64
+	ActiveConnections   int64
+	HandledConnections  int64
+}
+
+// Statistics returns statistics for periodic monitoring.
+func (s *Service) Statistics(tags map[string]string) []models.Statistic {
+	return []models.Statistic{{
+		Name: "graphite",
+		Tags: s.defaultTags.Merge(tags),
+		Values: map[string]interface{}{
+			statPointsReceived:      atomic.LoadInt64(&s.stats.PointsReceived),
+			statBytesReceived:       atomic.LoadInt64(&s.stats.BytesReceived),
+			statPointsParseFail:     atomic.LoadInt64(&s.stats.PointsParseFail),
+			statPointsNaNFail:       atomic.LoadInt64(&s.stats.PointsNaNFail),
+			statBatchesTransmitted:  atomic.LoadInt64(&s.stats.BatchesTransmitted),
+			statPointsTransmitted:   atomic.LoadInt64(&s.stats.PointsTransmitted),
+			statBatchesTransmitFail: atomic.LoadInt64(&s.stats.BatchesTransmitFail),
+			statConnectionsActive:   atomic.LoadInt64(&s.stats.ActiveConnections),
+			statConnectionsHandled:  atomic.LoadInt64(&s.stats.HandledConnections),
+		},
+	}}
 }
 
 // Addr returns the address the Service binds to.
@@ -237,7 +329,7 @@ func (s *Service) openTCPServer() (net.Addr, error) {
 		for {
 			conn, err := s.ln.Accept()
 			if opErr, ok := err.(*net.OpError); ok && !opErr.Temporary() {
-				s.logger.Info("graphite TCP listener closed")
+				s.logger.Info("Graphite TCP listener closed")
 				return
 			}
 			if err != nil {
@@ -256,10 +348,10 @@ func (s *Service) openTCPServer() (net.Addr, error) {
 func (s *Service) handleTCPConnection(conn net.Conn) {
 	defer s.wg.Done()
 	defer conn.Close()
-	defer s.statMap.Add(statConnectionsActive, -1)
+	defer atomic.AddInt64(&s.stats.ActiveConnections, -1)
 	defer s.untrackConnection(conn)
-	s.statMap.Add(statConnectionsActive, 1)
-	s.statMap.Add(statConnectionsHandled, 1)
+	atomic.AddInt64(&s.stats.ActiveConnections, 1)
+	atomic.AddInt64(&s.stats.HandledConnections, 1)
 	s.trackConnection(conn)
 
 	reader := bufio.NewReader(conn)
@@ -274,8 +366,8 @@ func (s *Service) handleTCPConnection(conn net.Conn) {
 		// Trim the buffer, even though there should be no padding
 		line := strings.TrimSpace(string(buf))
 
-		s.statMap.Add(statPointsReceived, 1)
-		s.statMap.Add(statBytesReceived, int64(len(buf)))
+		atomic.AddInt64(&s.stats.PointsReceived, 1)
+		atomic.AddInt64(&s.stats.BytesReceived, int64(len(buf)))
 		s.handleLine(line)
 	}
 }
@@ -329,8 +421,8 @@ func (s *Service) openUDPServer() (net.Addr, error) {
 			for _, line := range lines {
 				s.handleLine(line)
 			}
-			s.statMap.Add(statPointsReceived, int64(len(lines)))
-			s.statMap.Add(statBytesReceived, int64(n))
+			atomic.AddInt64(&s.stats.PointsReceived, int64(len(lines)))
+			atomic.AddInt64(&s.stats.BytesReceived, int64(n))
 		}
 	}()
 	return s.udpConn.LocalAddr(), nil
@@ -348,14 +440,12 @@ func (s *Service) handleLine(line string) {
 		case *UnsupportedValueError:
 			// Graphite ignores NaN values with no error.
 			if math.IsNaN(err.Value) {
-				s.statMap.Add(statPointsNaNFail, 1)
+				atomic.AddInt64(&s.stats.PointsNaNFail, 1)
 				return
 			}
 		}
-		s.logger.Info("Unable to parse line",
-			zap.String("line", line),
-			zap.Error(err))
-		s.statMap.Add(statPointsParseFail, 1)
+		s.logger.Info("Unable to parse line", zap.String("line", line), zap.Error(err))
+		atomic.AddInt64(&s.stats.PointsParseFail, 1)
 		return
 	}
 
@@ -368,19 +458,19 @@ func (s *Service) processBatches(batcher *tsdb.PointBatcher) {
 	for {
 		select {
 		case batch := <-batcher.Out():
-			if err := s.PointsWriter.WritePoints(&coordinator.WritePointsRequest{
-				Database:         s.database,
-				RetentionPolicy:  "",
-				ConsistencyLevel: s.consistencyLevel,
-				Points:           batch,
-			}); err == nil {
-				s.statMap.Add(statBatchesTransmitted, 1)
-				s.statMap.Add(statPointsTransmitted, int64(len(batch)))
+			// Will attempt to create database if not yet created.
+			if err := s.createInternalStorage(); err != nil {
+				s.logger.Info("Required database or retention policy do not yet exist", zap.Error(err))
+				continue
+			}
+
+			if err := s.PointsWriter.WritePointsPrivileged(s.database, s.retentionPolicy, coordinator.ConsistencyLevelAny, batch); err == nil {
+				atomic.AddInt64(&s.stats.BatchesTransmitted, 1)
+				atomic.AddInt64(&s.stats.PointsTransmitted, int64(len(batch)))
 			} else {
-				s.logger.Info("Failed to write point batch",
-					logger.Database(s.database),
-					zap.Error(err))
-				s.statMap.Add(statBatchesTransmitFail, 1)
+				s.logger.Info("Failed to write point batch to database",
+					logger.Database(s.database), zap.Error(err))
+				atomic.AddInt64(&s.stats.BatchesTransmitFail, 1)
 			}
 
 		case <-s.done:

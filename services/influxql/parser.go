@@ -7,7 +7,6 @@ import (
 	"io"
 	"math"
 	"regexp"
-	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -23,12 +22,18 @@ const (
 
 // Parser represents an InfluxQL parser.
 type Parser struct {
-	s *bufScanner
+	s      *bufScanner
+	params map[string]interface{}
 }
 
 // NewParser returns a new instance of Parser.
 func NewParser(r io.Reader) *Parser {
 	return &Parser{s: newBufScanner(r)}
+}
+
+// SetParams sets the parameters that will be used for any bound parameter substitutions.
+func (p *Parser) SetParams(params map[string]interface{}) {
+	p.params = params
 }
 
 // ParseQuery parses a query string and returns its AST representation.
@@ -63,15 +68,18 @@ func MustParseExpr(s string) Expr {
 // ParseQuery parses an InfluxQL string and returns a Query AST object.
 func (p *Parser) ParseQuery() (*Query, error) {
 	var statements Statements
-	var semi bool
+	semi := true
 
 	for {
-		if tok, _, _ := p.scanIgnoreWhitespace(); tok == EOF {
+		if tok, pos, lit := p.ScanIgnoreWhitespace(); tok == EOF {
 			return &Query{Statements: statements}, nil
-		} else if !semi && tok == SEMICOLON {
+		} else if tok == SEMICOLON {
 			semi = true
 		} else {
-			p.unscan()
+			if !semi {
+				return nil, newParseError(tokstr(tok, lit), []string{";"}, pos)
+			}
+			p.Unscan()
 			s, err := p.ParseStatement()
 			if err != nil {
 				return nil, err
@@ -84,172 +92,7 @@ func (p *Parser) ParseQuery() (*Query, error) {
 
 // ParseStatement parses an InfluxQL string and returns a Statement AST object.
 func (p *Parser) ParseStatement() (Statement, error) {
-	// Inspect the first token.
-	tok, pos, lit := p.scanIgnoreWhitespace()
-	switch tok {
-	case SELECT:
-		return p.parseSelectStatement(targetNotRequired)
-	case DELETE:
-		return p.parseDeleteStatement()
-	case SHOW:
-		return p.parseShowStatement()
-	case CREATE:
-		return p.parseCreateStatement()
-	case DROP:
-		return p.parseDropStatement()
-	case GRANT:
-		return p.parseGrantStatement()
-	case REVOKE:
-		return p.parseRevokeStatement()
-	case ALTER:
-		return p.parseAlterStatement()
-	case SET:
-		return p.parseSetPasswordUserStatement()
-	default:
-		return nil, newParseError(tokstr(tok, lit), []string{"SELECT", "DELETE", "SHOW", "CREATE", "DROP", "GRANT", "REVOKE", "ALTER", "SET"}, pos)
-	}
-}
-
-// parseShowStatement parses a string and returns a list statement.
-// This function assumes the SHOW token has already been consumed.
-func (p *Parser) parseShowStatement() (Statement, error) {
-	tok, pos, lit := p.scanIgnoreWhitespace()
-	switch tok {
-	case CONTINUOUS:
-		return p.parseShowContinuousQueriesStatement()
-	case GRANTS:
-		return p.parseGrantsForUserStatement()
-	case DATABASES:
-		return p.parseShowDatabasesStatement()
-	case SERVERS:
-		return p.parseShowServersStatement()
-	case FIELD:
-		tok, pos, lit := p.scanIgnoreWhitespace()
-		if tok == KEYS {
-			return p.parseShowFieldKeysStatement()
-		}
-		return nil, newParseError(tokstr(tok, lit), []string{"KEYS"}, pos)
-	case MEASUREMENTS:
-		return p.parseShowMeasurementsStatement()
-	case RETENTION:
-		tok, pos, lit := p.scanIgnoreWhitespace()
-		if tok == POLICIES {
-			return p.parseShowRetentionPoliciesStatement()
-		}
-		return nil, newParseError(tokstr(tok, lit), []string{"POLICIES"}, pos)
-	case SERIES:
-		return p.parseShowSeriesStatement()
-	case SHARD:
-		tok, pos, lit := p.scanIgnoreWhitespace()
-		if tok == GROUPS {
-			return p.parseShowShardGroupsStatement()
-		}
-		return nil, newParseError(tokstr(tok, lit), []string{"GROUPS"}, pos)
-	case SHARDS:
-		return p.parseShowShardsStatement()
-	case STATS:
-		return p.parseShowStatsStatement()
-	case DIAGNOSTICS:
-		return p.parseShowDiagnosticsStatement()
-	case TAG:
-		tok, pos, lit := p.scanIgnoreWhitespace()
-		if tok == KEYS {
-			return p.parseShowTagKeysStatement()
-		} else if tok == VALUES {
-			return p.parseShowTagValuesStatement()
-		}
-		return nil, newParseError(tokstr(tok, lit), []string{"KEYS", "VALUES"}, pos)
-	case USERS:
-		return p.parseShowUsersStatement()
-	case SUBSCRIPTIONS:
-		return p.parseShowSubscriptionsStatement()
-	}
-
-	showQueryKeywords := []string{
-		"CONTINUOUS",
-		"DATABASES",
-		"FIELD",
-		"GRANTS",
-		"MEASUREMENTS",
-		"RETENTION",
-		"SERIES",
-		"SERVERS",
-		"TAG",
-		"USERS",
-		"STATS",
-		"DIAGNOSTICS",
-		"SHARD",
-		"SHARDS",
-		"SUBSCRIPTIONS",
-	}
-	sort.Strings(showQueryKeywords)
-
-	return nil, newParseError(tokstr(tok, lit), showQueryKeywords, pos)
-}
-
-// parseCreateStatement parses a string and returns a create statement.
-// This function assumes the CREATE token has already been consumed.
-func (p *Parser) parseCreateStatement() (Statement, error) {
-	tok, pos, lit := p.scanIgnoreWhitespace()
-	if tok == CONTINUOUS {
-		return p.parseCreateContinuousQueryStatement()
-	} else if tok == DATABASE {
-		return p.parseCreateDatabaseStatement()
-	} else if tok == USER {
-		return p.parseCreateUserStatement()
-	} else if tok == RETENTION {
-		tok, pos, lit = p.scanIgnoreWhitespace()
-		if tok != POLICY {
-			return nil, newParseError(tokstr(tok, lit), []string{"POLICY"}, pos)
-		}
-		return p.parseCreateRetentionPolicyStatement()
-	} else if tok == SUBSCRIPTION {
-		return p.parseCreateSubscriptionStatement()
-	}
-
-	return nil, newParseError(tokstr(tok, lit), []string{"CONTINUOUS", "DATABASE", "USER", "RETENTION", "SUBSCRIPTION"}, pos)
-}
-
-// parseDropStatement parses a string and returns a drop statement.
-// This function assumes the DROP token has already been consumed.
-func (p *Parser) parseDropStatement() (Statement, error) {
-	tok, pos, lit := p.scanIgnoreWhitespace()
-	if tok == SERIES {
-		return p.parseDropSeriesStatement()
-	} else if tok == MEASUREMENT {
-		return p.parseDropMeasurementStatement()
-	} else if tok == CONTINUOUS {
-		return p.parseDropContinuousQueryStatement()
-	} else if tok == DATABASE {
-		return p.parseDropDatabaseStatement()
-	} else if tok == RETENTION {
-		if tok, pos, lit := p.scanIgnoreWhitespace(); tok != POLICY {
-			return nil, newParseError(tokstr(tok, lit), []string{"POLICY"}, pos)
-		}
-		return p.parseDropRetentionPolicyStatement()
-	} else if tok == USER {
-		return p.parseDropUserStatement()
-	} else if tok == META || tok == DATA {
-		return p.parseDropServerStatement(tok)
-	} else if tok == SUBSCRIPTION {
-		return p.parseDropSubscriptionStatement()
-	}
-
-	return nil, newParseError(tokstr(tok, lit), []string{"SERIES", "CONTINUOUS", "MEASUREMENT", "SERVER", "SUBSCRIPTION"}, pos)
-}
-
-// parseAlterStatement parses a string and returns an alter statement.
-// This function assumes the ALTER token has already been consumed.
-func (p *Parser) parseAlterStatement() (Statement, error) {
-	tok, pos, lit := p.scanIgnoreWhitespace()
-	if tok == RETENTION {
-		if tok, pos, lit = p.scanIgnoreWhitespace(); tok != POLICY {
-			return nil, newParseError(tokstr(tok, lit), []string{"POLICY"}, pos)
-		}
-		return p.parseAlterRetentionPolicyStatement()
-	}
-
-	return nil, newParseError(tokstr(tok, lit), []string{"RETENTION"}, pos)
+	return Language.Parse(p)
 }
 
 // parseSetPasswordUserStatement parses a string and returns a set statement.
@@ -257,13 +100,8 @@ func (p *Parser) parseAlterStatement() (Statement, error) {
 func (p *Parser) parseSetPasswordUserStatement() (*SetPasswordUserStatement, error) {
 	stmt := &SetPasswordUserStatement{}
 
-	// Consume the required PASSWORD FOR tokens.
-	if err := p.parseTokens([]Token{PASSWORD, FOR}); err != nil {
-		return nil, err
-	}
-
 	// Parse username
-	ident, err := p.parseIdent()
+	ident, err := p.ParseIdent()
 
 	if err != nil {
 		return nil, err
@@ -271,7 +109,7 @@ func (p *Parser) parseSetPasswordUserStatement() (*SetPasswordUserStatement, err
 	stmt.Name = ident
 
 	// Consume the required = token.
-	if tok, pos, lit := p.scanIgnoreWhitespace(); tok != EQ {
+	if tok, pos, lit := p.ScanIgnoreWhitespace(); tok != EQ {
 		return nil, newParseError(tokstr(tok, lit), []string{"="}, pos)
 	}
 
@@ -284,46 +122,66 @@ func (p *Parser) parseSetPasswordUserStatement() (*SetPasswordUserStatement, err
 	return stmt, nil
 }
 
-// parseCreateSubscriptionStatement parses a string and returns a CreatesubScriptionStatement.
+// parseKillQueryStatement parses a string and returns a kill statement.
+// This function assumes the KILL token has already been consumed.
+func (p *Parser) parseKillQueryStatement() (*KillQueryStatement, error) {
+	qid, err := p.ParseUInt64()
+	if err != nil {
+		return nil, err
+	}
+
+	var host string
+	if tok, _, _ := p.ScanIgnoreWhitespace(); tok == ON {
+		host, err = p.ParseIdent()
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		p.Unscan()
+	}
+	return &KillQueryStatement{QueryID: qid, Host: host}, nil
+}
+
+// parseCreateSubscriptionStatement parses a string and returns a CreateSubscriptionStatement.
 // This function assumes the "CREATE SUBSCRIPTION" tokens have already been consumed.
 func (p *Parser) parseCreateSubscriptionStatement() (*CreateSubscriptionStatement, error) {
 	stmt := &CreateSubscriptionStatement{}
 
 	// Read the id of the subscription to create.
-	ident, err := p.parseIdent()
+	ident, err := p.ParseIdent()
 	if err != nil {
 		return nil, err
 	}
 	stmt.Name = ident
 
 	// Expect an "ON" keyword.
-	if tok, pos, lit := p.scanIgnoreWhitespace(); tok != ON {
+	if tok, pos, lit := p.ScanIgnoreWhitespace(); tok != ON {
 		return nil, newParseError(tokstr(tok, lit), []string{"ON"}, pos)
 	}
 
 	// Read the name of the database.
-	if ident, err = p.parseIdent(); err != nil {
+	if ident, err = p.ParseIdent(); err != nil {
 		return nil, err
 	}
 	stmt.Database = ident
 
-	if tok, pos, lit := p.scan(); tok != DOT {
+	if tok, pos, lit := p.Scan(); tok != DOT {
 		return nil, newParseError(tokstr(tok, lit), []string{"."}, pos)
 	}
 
 	// Read the name of the retention policy.
-	if ident, err = p.parseIdent(); err != nil {
+	if ident, err = p.ParseIdent(); err != nil {
 		return nil, err
 	}
 	stmt.RetentionPolicy = ident
 
 	// Expect a "DESTINATIONS" keyword.
-	if tok, pos, lit := p.scanIgnoreWhitespace(); tok != DESTINATIONS {
+	if tok, pos, lit := p.ScanIgnoreWhitespace(); tok != DESTINATIONS {
 		return nil, newParseError(tokstr(tok, lit), []string{"DESTINATIONS"}, pos)
 	}
 
 	// Expect one of "ANY ALL" keywords.
-	if tok, pos, lit := p.scanIgnoreWhitespace(); tok == ALL || tok == ANY {
+	if tok, pos, lit := p.ScanIgnoreWhitespace(); tok == ALL || tok == ANY {
 		stmt.Mode = tokens[tok]
 	} else {
 		return nil, newParseError(tokstr(tok, lit), []string{"ALL", "ANY"}, pos)
@@ -345,54 +203,78 @@ func (p *Parser) parseCreateRetentionPolicyStatement() (*CreateRetentionPolicySt
 	stmt := &CreateRetentionPolicyStatement{}
 
 	// Parse the retention policy name.
-	ident, err := p.parseIdent()
+	ident, err := p.ParseIdent()
 	if err != nil {
 		return nil, err
 	}
 	stmt.Name = ident
 
 	// Consume the required ON token.
-	if tok, pos, lit := p.scanIgnoreWhitespace(); tok != ON {
+	if tok, pos, lit := p.ScanIgnoreWhitespace(); tok != ON {
 		return nil, newParseError(tokstr(tok, lit), []string{"ON"}, pos)
 	}
 
 	// Parse the database name.
-	ident, err = p.parseIdent()
+	ident, err = p.ParseIdent()
 	if err != nil {
 		return nil, err
 	}
 	stmt.Database = ident
 
 	// Parse required DURATION token.
-	tok, pos, lit := p.scanIgnoreWhitespace()
-	if tok != DURATION {
+	if tok, pos, lit := p.ScanIgnoreWhitespace(); tok != DURATION {
 		return nil, newParseError(tokstr(tok, lit), []string{"DURATION"}, pos)
 	}
 
 	// Parse duration value
-	d, err := p.parseDuration()
+	d, err := p.ParseDuration()
 	if err != nil {
 		return nil, err
 	}
 	stmt.Duration = d
 
 	// Parse required REPLICATION token.
-	if tok, pos, lit = p.scanIgnoreWhitespace(); tok != REPLICATION {
+	if tok, pos, lit := p.ScanIgnoreWhitespace(); tok != REPLICATION {
 		return nil, newParseError(tokstr(tok, lit), []string{"REPLICATION"}, pos)
 	}
 
 	// Parse replication value.
-	n, err := p.parseInt(1, math.MaxInt32)
+	n, err := p.ParseInt(1, math.MaxInt32)
 	if err != nil {
 		return nil, err
 	}
 	stmt.Replication = n
 
+	// Parse optional SHARD token.
+	if tok, _, _ := p.ScanIgnoreWhitespace(); tok == SHARD {
+		if tok, pos, lit := p.ScanIgnoreWhitespace(); tok != DURATION {
+			return nil, newParseError(tokstr(tok, lit), []string{"DURATION"}, pos)
+		}
+
+		// Check to see if they used the INF keyword
+		tok, pos, _ := p.ScanIgnoreWhitespace()
+		if tok == INF {
+			return nil, &ParseError{
+				Message: "invalid duration INF for shard duration",
+				Pos:     pos,
+			}
+		}
+		p.Unscan()
+
+		d, err := p.ParseDuration()
+		if err != nil {
+			return nil, err
+		}
+		stmt.ShardGroupDuration = d
+	} else {
+		p.Unscan()
+	}
+
 	// Parse optional DEFAULT token.
-	if tok, pos, lit = p.scanIgnoreWhitespace(); tok == DEFAULT {
+	if tok, _, _ := p.ScanIgnoreWhitespace(); tok == DEFAULT {
 		stmt.Default = true
-	} else if tok != EOF && tok != SEMICOLON {
-		return nil, newParseError(tokstr(tok, lit), []string{"DEFAULT"}, pos)
+	} else {
+		p.Unscan()
 	}
 
 	return stmt, nil
@@ -404,7 +286,7 @@ func (p *Parser) parseAlterRetentionPolicyStatement() (*AlterRetentionPolicyStat
 	stmt := &AlterRetentionPolicyStatement{}
 
 	// Parse the retention policy name.
-	tok, pos, lit := p.scanIgnoreWhitespace()
+	tok, pos, lit := p.ScanIgnoreWhitespace()
 	if tok == DEFAULT {
 		stmt.Name = "default"
 	} else if tok == IDENT {
@@ -414,59 +296,84 @@ func (p *Parser) parseAlterRetentionPolicyStatement() (*AlterRetentionPolicyStat
 	}
 
 	// Consume the required ON token.
-	if tok, pos, lit = p.scanIgnoreWhitespace(); tok != ON {
+	if tok, pos, lit = p.ScanIgnoreWhitespace(); tok != ON {
 		return nil, newParseError(tokstr(tok, lit), []string{"ON"}, pos)
 	}
 
 	// Parse the database name.
-	ident, err := p.parseIdent()
+	ident, err := p.ParseIdent()
 	if err != nil {
 		return nil, err
 	}
 	stmt.Database = ident
 
-	// Loop through option tokens (DURATION, REPLICATION, DEFAULT, etc.).
-	maxNumOptions := 3
+	// Loop through option tokens (DURATION, REPLICATION, SHARD DURATION, DEFAULT, etc.).
+	found := make(map[Token]struct{})
 Loop:
-	for i := 0; i < maxNumOptions; i++ {
-		tok, pos, lit := p.scanIgnoreWhitespace()
+	for {
+		tok, pos, lit := p.ScanIgnoreWhitespace()
+		if _, ok := found[tok]; ok {
+			return nil, &ParseError{
+				Message: fmt.Sprintf("found duplicate %s option", tok),
+				Pos:     pos,
+			}
+		}
+
 		switch tok {
 		case DURATION:
-			d, err := p.parseDuration()
+			d, err := p.ParseDuration()
 			if err != nil {
 				return nil, err
 			}
 			stmt.Duration = &d
 		case REPLICATION:
-			n, err := p.parseInt(1, math.MaxInt32)
+			n, err := p.ParseInt(1, math.MaxInt32)
 			if err != nil {
 				return nil, err
 			}
 			stmt.Replication = &n
+		case SHARD:
+			tok, pos, lit := p.ScanIgnoreWhitespace()
+			if tok == DURATION {
+				// Check to see if they used the INF keyword
+				tok, pos, _ := p.ScanIgnoreWhitespace()
+				if tok == INF {
+					return nil, &ParseError{
+						Message: "invalid duration INF for shard duration",
+						Pos:     pos,
+					}
+				}
+				p.Unscan()
+
+				d, err := p.ParseDuration()
+				if err != nil {
+					return nil, err
+				}
+				stmt.ShardGroupDuration = &d
+			} else {
+				return nil, newParseError(tokstr(tok, lit), []string{"DURATION"}, pos)
+			}
 		case DEFAULT:
 			stmt.Default = true
 		default:
-			if i < 1 {
-				return nil, newParseError(tokstr(tok, lit), []string{"DURATION", "RETENTION", "DEFAULT"}, pos)
+			if len(found) == 0 {
+				return nil, newParseError(tokstr(tok, lit), []string{"DURATION", "REPLICATION", "SHARD", "DEFAULT"}, pos)
 			}
-			p.unscan()
+			p.Unscan()
 			break Loop
 		}
+		found[tok] = struct{}{}
 	}
 
 	return stmt, nil
 }
 
-// parseInt parses a string and returns an integer literal.
-func (p *Parser) parseInt(min, max int) (int, error) {
-	tok, pos, lit := p.scanIgnoreWhitespace()
-	if tok != NUMBER {
-		return 0, newParseError(tokstr(tok, lit), []string{"number"}, pos)
-	}
-
-	// Return an error if the number has a fractional part.
-	if strings.Contains(lit, ".") {
-		return 0, &ParseError{Message: "number must be an integer", Pos: pos}
+// ParseInt parses a string representing a base 10 integer and returns the number.
+// It returns an error if the parsed number is outside the range [min, max].
+func (p *Parser) ParseInt(min, max int) (int, error) {
+	tok, pos, lit := p.ScanIgnoreWhitespace()
+	if tok != INTEGER {
+		return 0, newParseError(tokstr(tok, lit), []string{"integer"}, pos)
 	}
 
 	// Convert string to int.
@@ -483,27 +390,11 @@ func (p *Parser) parseInt(min, max int) (int, error) {
 	return n, nil
 }
 
-// parseUInt32 parses a string and returns a 32-bit unsigned integer literal.
-func (p *Parser) parseUInt32() (uint32, error) {
-	tok, pos, lit := p.scanIgnoreWhitespace()
-	if tok != NUMBER {
-		return 0, newParseError(tokstr(tok, lit), []string{"number"}, pos)
-	}
-
-	// Convert string to unsigned 32-bit integer
-	n, err := strconv.ParseUint(lit, 10, 32)
-	if err != nil {
-		return 0, &ParseError{Message: err.Error(), Pos: pos}
-	}
-
-	return uint32(n), nil
-}
-
-// parseUInt64 parses a string and returns a 64-bit unsigned integer literal.
-func (p *Parser) parseUInt64() (uint64, error) {
-	tok, pos, lit := p.scanIgnoreWhitespace()
-	if tok != NUMBER {
-		return 0, newParseError(tokstr(tok, lit), []string{"number"}, pos)
+// ParseUInt64 parses a string and returns a 64-bit unsigned integer literal.
+func (p *Parser) ParseUInt64() (uint64, error) {
+	tok, pos, lit := p.ScanIgnoreWhitespace()
+	if tok != INTEGER {
+		return 0, newParseError(tokstr(tok, lit), []string{"integer"}, pos)
 	}
 
 	// Convert string to unsigned 64-bit integer
@@ -515,10 +406,10 @@ func (p *Parser) parseUInt64() (uint64, error) {
 	return uint64(n), nil
 }
 
-// parseDuration parses a string and returns a duration literal.
+// ParseDuration parses a string and returns a duration literal.
 // This function assumes the DURATION token has already been consumed.
-func (p *Parser) parseDuration() (time.Duration, error) {
-	tok, pos, lit := p.scanIgnoreWhitespace()
+func (p *Parser) ParseDuration() (time.Duration, error) {
+	tok, pos, lit := p.ScanIgnoreWhitespace()
 	if tok != DURATIONVAL && tok != INF {
 		return 0, newParseError(tokstr(tok, lit), []string{"duration"}, pos)
 	}
@@ -535,19 +426,19 @@ func (p *Parser) parseDuration() (time.Duration, error) {
 	return d, nil
 }
 
-// parseIdent parses an identifier.
-func (p *Parser) parseIdent() (string, error) {
-	tok, pos, lit := p.scanIgnoreWhitespace()
+// ParseIdent parses an identifier.
+func (p *Parser) ParseIdent() (string, error) {
+	tok, pos, lit := p.ScanIgnoreWhitespace()
 	if tok != IDENT {
 		return "", newParseError(tokstr(tok, lit), []string{"identifier"}, pos)
 	}
 	return lit, nil
 }
 
-// parseIdentList parses a comma delimited list of identifiers.
-func (p *Parser) parseIdentList() ([]string, error) {
+// ParseIdentList parses a comma delimited list of identifiers.
+func (p *Parser) ParseIdentList() ([]string, error) {
 	// Parse first (required) identifier.
-	ident, err := p.parseIdent()
+	ident, err := p.ParseIdent()
 	if err != nil {
 		return nil, err
 	}
@@ -555,12 +446,12 @@ func (p *Parser) parseIdentList() ([]string, error) {
 
 	// Parse remaining (optional) identifiers.
 	for {
-		if tok, _, _ := p.scanIgnoreWhitespace(); tok != COMMA {
-			p.unscan()
+		if tok, _, _ := p.ScanIgnoreWhitespace(); tok != COMMA {
+			p.Unscan()
 			return idents, nil
 		}
 
-		if ident, err = p.parseIdent(); err != nil {
+		if ident, err = p.ParseIdent(); err != nil {
 			return nil, err
 		}
 
@@ -571,7 +462,7 @@ func (p *Parser) parseIdentList() ([]string, error) {
 // parseSegmentedIdents parses a segmented identifiers.
 // e.g.,  "db"."rp".measurement  or  "db"..measurement
 func (p *Parser) parseSegmentedIdents() ([]string, error) {
-	ident, err := p.parseIdent()
+	ident, err := p.ParseIdent()
 	if err != nil {
 		return nil, err
 	}
@@ -579,9 +470,9 @@ func (p *Parser) parseSegmentedIdents() ([]string, error) {
 
 	// Parse remaining (optional) identifiers.
 	for {
-		if tok, _, _ := p.scan(); tok != DOT {
+		if tok, _, _ := p.Scan(); tok != DOT {
 			// No more segments so we're done.
-			p.unscan()
+			p.Unscan()
 			break
 		}
 
@@ -598,7 +489,7 @@ func (p *Parser) parseSegmentedIdents() ([]string, error) {
 		}
 
 		// Parse the next identifier.
-		if ident, err = p.parseIdent(); err != nil {
+		if ident, err = p.ParseIdent(); err != nil {
 			return nil, err
 		}
 
@@ -613,16 +504,16 @@ func (p *Parser) parseSegmentedIdents() ([]string, error) {
 	return idents, nil
 }
 
-// parserString parses a string.
+// parseString parses a string.
 func (p *Parser) parseString() (string, error) {
-	tok, pos, lit := p.scanIgnoreWhitespace()
+	tok, pos, lit := p.ScanIgnoreWhitespace()
 	if tok != STRING {
 		return "", newParseError(tokstr(tok, lit), []string{"string"}, pos)
 	}
 	return lit, nil
 }
 
-// parserString parses a string.
+// parseStringList parses a list of strings separated by commas.
 func (p *Parser) parseStringList() ([]string, error) {
 	// Parse first (required) string.
 	str, err := p.parseString()
@@ -633,8 +524,8 @@ func (p *Parser) parseStringList() ([]string, error) {
 
 	// Parse remaining (optional) strings.
 	for {
-		if tok, _, _ := p.scanIgnoreWhitespace(); tok != COMMA {
-			p.unscan()
+		if tok, _, _ := p.ScanIgnoreWhitespace(); tok != COMMA {
+			p.Unscan()
 			return strs, nil
 		}
 
@@ -656,7 +547,7 @@ func (p *Parser) parseRevokeStatement() (Statement, error) {
 	}
 
 	// Check for ON or FROM clauses.
-	tok, pos, lit := p.scanIgnoreWhitespace()
+	tok, pos, lit := p.ScanIgnoreWhitespace()
 	if tok == ON {
 		stmt, err := p.parseRevokeOnStatement()
 		if err != nil {
@@ -685,14 +576,14 @@ func (p *Parser) parseRevokeOnStatement() (*RevokeStatement, error) {
 	stmt := &RevokeStatement{}
 
 	// Parse the name of the database.
-	lit, err := p.parseIdent()
+	lit, err := p.ParseIdent()
 	if err != nil {
 		return nil, err
 	}
 	stmt.On = lit
 
 	// Parse FROM clause.
-	tok, pos, lit := p.scanIgnoreWhitespace()
+	tok, pos, lit := p.ScanIgnoreWhitespace()
 
 	// Check for required FROM token.
 	if tok != FROM {
@@ -700,7 +591,7 @@ func (p *Parser) parseRevokeOnStatement() (*RevokeStatement, error) {
 	}
 
 	// Parse the name of the user.
-	lit, err = p.parseIdent()
+	lit, err = p.ParseIdent()
 	if err != nil {
 		return nil, err
 	}
@@ -716,7 +607,7 @@ func (p *Parser) parseRevokeAdminStatement() (*RevokeAdminStatement, error) {
 	stmt := &RevokeAdminStatement{}
 
 	// Parse the name of the user.
-	lit, err := p.parseIdent()
+	lit, err := p.ParseIdent()
 	if err != nil {
 		return nil, err
 	}
@@ -735,7 +626,7 @@ func (p *Parser) parseGrantStatement() (Statement, error) {
 	}
 
 	// Check for ON or TO clauses.
-	tok, pos, lit := p.scanIgnoreWhitespace()
+	tok, pos, lit := p.ScanIgnoreWhitespace()
 	if tok == ON {
 		stmt, err := p.parseGrantOnStatement()
 		if err != nil {
@@ -764,14 +655,14 @@ func (p *Parser) parseGrantOnStatement() (*GrantStatement, error) {
 	stmt := &GrantStatement{}
 
 	// Parse the name of the database.
-	lit, err := p.parseIdent()
+	lit, err := p.ParseIdent()
 	if err != nil {
 		return nil, err
 	}
 	stmt.On = lit
 
 	// Parse TO clause.
-	tok, pos, lit := p.scanIgnoreWhitespace()
+	tok, pos, lit := p.ScanIgnoreWhitespace()
 
 	// Check for required TO token.
 	if tok != TO {
@@ -779,7 +670,7 @@ func (p *Parser) parseGrantOnStatement() (*GrantStatement, error) {
 	}
 
 	// Parse the name of the user.
-	lit, err = p.parseIdent()
+	lit, err = p.ParseIdent()
 	if err != nil {
 		return nil, err
 	}
@@ -795,7 +686,7 @@ func (p *Parser) parseGrantAdminStatement() (*GrantAdminStatement, error) {
 	stmt := &GrantAdminStatement{}
 
 	// Parse the name of the user.
-	lit, err := p.parseIdent()
+	lit, err := p.ParseIdent()
 	if err != nil {
 		return nil, err
 	}
@@ -804,9 +695,9 @@ func (p *Parser) parseGrantAdminStatement() (*GrantAdminStatement, error) {
 	return stmt, nil
 }
 
-// parsePrivilege parses a string and returns a Privilege
+// parsePrivilege parses a string and returns a Privilege.
 func (p *Parser) parsePrivilege() (Privilege, error) {
-	tok, pos, lit := p.scanIgnoreWhitespace()
+	tok, pos, lit := p.ScanIgnoreWhitespace()
 	switch tok {
 	case READ:
 		return ReadPrivilege, nil
@@ -814,9 +705,9 @@ func (p *Parser) parsePrivilege() (Privilege, error) {
 		return WritePrivilege, nil
 	case ALL:
 		// Consume optional PRIVILEGES token
-		tok, pos, lit = p.scanIgnoreWhitespace()
+		tok, pos, lit = p.ScanIgnoreWhitespace()
 		if tok != PRIVILEGES {
-			p.unscan()
+			p.Unscan()
 		}
 		return AllPrivileges, nil
 	}
@@ -840,10 +731,10 @@ func (p *Parser) parseSelectStatement(tr targetRequirement) (*SelectStatement, e
 	}
 
 	// Parse source: "FROM".
-	if tok, pos, lit := p.scanIgnoreWhitespace(); tok != FROM {
+	if tok, pos, lit := p.ScanIgnoreWhitespace(); tok != FROM {
 		return nil, newParseError(tokstr(tok, lit), []string{"FROM"}, pos)
 	}
-	if stmt.Sources, err = p.parseSources(); err != nil {
+	if stmt.Sources, err = p.parseSources(true); err != nil {
 		return nil, err
 	}
 
@@ -868,22 +759,27 @@ func (p *Parser) parseSelectStatement(tr targetRequirement) (*SelectStatement, e
 	}
 
 	// Parse limit: "LIMIT <n>".
-	if stmt.Limit, err = p.parseOptionalTokenAndInt(LIMIT); err != nil {
+	if stmt.Limit, err = p.ParseOptionalTokenAndInt(LIMIT); err != nil {
 		return nil, err
 	}
 
 	// Parse offset: "OFFSET <n>".
-	if stmt.Offset, err = p.parseOptionalTokenAndInt(OFFSET); err != nil {
+	if stmt.Offset, err = p.ParseOptionalTokenAndInt(OFFSET); err != nil {
 		return nil, err
 	}
 
 	// Parse series limit: "SLIMIT <n>".
-	if stmt.SLimit, err = p.parseOptionalTokenAndInt(SLIMIT); err != nil {
+	if stmt.SLimit, err = p.ParseOptionalTokenAndInt(SLIMIT); err != nil {
 		return nil, err
 	}
 
 	// Parse series offset: "SOFFSET <n>".
-	if stmt.SOffset, err = p.parseOptionalTokenAndInt(SOFFSET); err != nil {
+	if stmt.SOffset, err = p.ParseOptionalTokenAndInt(SOFFSET); err != nil {
+		return nil, err
+	}
+
+	// Parse timezone: "TZ(<timezone>)".
+	if stmt.Location, err = p.parseLocation(); err != nil {
 		return nil, err
 	}
 
@@ -895,10 +791,6 @@ func (p *Parser) parseSelectStatement(tr targetRequirement) (*SelectStatement, e
 		}
 	})
 
-	if err := stmt.validate(tr); err != nil {
-		return nil, err
-	}
-
 	return stmt, nil
 }
 
@@ -908,15 +800,16 @@ type targetRequirement int
 const (
 	targetRequired targetRequirement = iota
 	targetNotRequired
+	targetSubquery
 )
 
 // parseTarget parses a string and returns a Target.
 func (p *Parser) parseTarget(tr targetRequirement) (*Target, error) {
-	if tok, pos, lit := p.scanIgnoreWhitespace(); tok != INTO {
+	if tok, pos, lit := p.ScanIgnoreWhitespace(); tok != INTO {
 		if tr == targetRequired {
 			return nil, newParseError(tokstr(tok, lit), []string{"INTO"}, pos)
 		}
-		p.unscan()
+		p.Unscan()
 		return nil, nil
 	}
 
@@ -954,353 +847,40 @@ func (p *Parser) parseTarget(tr targetRequirement) (*Target, error) {
 	return t, nil
 }
 
-// parseDeleteStatement parses a delete string and returns a DeleteStatement.
+// parseDeleteStatement parses a string and returns a delete statement.
 // This function assumes the DELETE token has already been consumed.
-func (p *Parser) parseDeleteStatement() (*DeleteStatement, error) {
-	// TODO remove and do not skip test once we wire up DELETE FROM.
-	// See issues https://github.com/freetsdb/freetsdb/issues/1647
-	// and https://github.com/freetsdb/freetsdb/issues/4404
-	return nil, errors.New("DELETE FROM is currently not supported. Use DROP SERIES or DROP MEASUREMENT instead")
-	//stmt := &DeleteStatement{}
-
-	//// Parse source
-	//if tok, pos, lit := p.scanIgnoreWhitespace(); tok != FROM {
-	//	return nil, newParseError(tokstr(tok, lit), []string{"FROM"}, pos)
-	//}
-	//source, err := p.parseSource()
-	//if err != nil {
-	//	return nil, err
-	//}
-	//stmt.Source = source
-
-	//// Parse condition: "WHERE EXPR".
-	//condition, err := p.parseCondition()
-	//if err != nil {
-	//	return nil, err
-	//}
-	//stmt.Condition = condition
-
-	//return stmt, nil
-}
-
-// parseShowSeriesStatement parses a string and returns a ShowSeriesStatement.
-// This function assumes the "SHOW SERIES" tokens have already been consumed.
-func (p *Parser) parseShowSeriesStatement() (*ShowSeriesStatement, error) {
-	stmt := &ShowSeriesStatement{}
+func (p *Parser) parseDeleteStatement() (Statement, error) {
+	stmt := &DeleteSeriesStatement{}
 	var err error
 
-	// Parse optional FROM.
-	if tok, _, _ := p.scanIgnoreWhitespace(); tok == FROM {
-		if stmt.Sources, err = p.parseSources(); err != nil {
-			return nil, err
-		}
-	} else {
-		p.unscan()
-	}
-
-	// Parse condition: "WHERE EXPR".
-	if stmt.Condition, err = p.parseCondition(); err != nil {
-		return nil, err
-	}
-
-	// Parse sort: "ORDER BY FIELD+".
-	if stmt.SortFields, err = p.parseOrderBy(); err != nil {
-		return nil, err
-	}
-
-	// Parse limit: "LIMIT <n>".
-	if stmt.Limit, err = p.parseOptionalTokenAndInt(LIMIT); err != nil {
-		return nil, err
-	}
-
-	// Parse offset: "OFFSET <n>".
-	if stmt.Offset, err = p.parseOptionalTokenAndInt(OFFSET); err != nil {
-		return nil, err
-	}
-
-	return stmt, nil
-}
-
-// parseShowMeasurementsStatement parses a string and returns a ShowSeriesStatement.
-// This function assumes the "SHOW MEASUREMENTS" tokens have already been consumed.
-func (p *Parser) parseShowMeasurementsStatement() (*ShowMeasurementsStatement, error) {
-	stmt := &ShowMeasurementsStatement{}
-	var err error
-
-	// Parse optional WITH clause.
-	if tok, _, _ := p.scanIgnoreWhitespace(); tok == WITH {
-		// Parse required MEASUREMENT token.
-		if err := p.parseTokens([]Token{MEASUREMENT}); err != nil {
-			return nil, err
-		}
-
-		// Parse required operator: = or =~.
-		tok, pos, lit := p.scanIgnoreWhitespace()
-		switch tok {
-		case EQ, EQREGEX:
-			// Parse required source (measurement name or regex).
-			if stmt.Source, err = p.parseSource(); err != nil {
-				return nil, err
-			}
-		default:
-			return nil, newParseError(tokstr(tok, lit), []string{"=", "=~"}, pos)
-		}
-	} else {
-		// Not a WITH clause so put the token back.
-		p.unscan()
-	}
-
-	// Parse condition: "WHERE EXPR".
-	if stmt.Condition, err = p.parseCondition(); err != nil {
-		return nil, err
-	}
-
-	// Parse sort: "ORDER BY FIELD+".
-	if stmt.SortFields, err = p.parseOrderBy(); err != nil {
-		return nil, err
-	}
-
-	// Parse limit: "LIMIT <n>".
-	if stmt.Limit, err = p.parseOptionalTokenAndInt(LIMIT); err != nil {
-		return nil, err
-	}
-
-	// Parse offset: "OFFSET <n>".
-	if stmt.Offset, err = p.parseOptionalTokenAndInt(OFFSET); err != nil {
-		return nil, err
-	}
-
-	return stmt, nil
-}
-
-// parseShowRetentionPoliciesStatement parses a string and returns a ShowRetentionPoliciesStatement.
-// This function assumes the "SHOW RETENTION POLICIES" tokens have been consumed.
-func (p *Parser) parseShowRetentionPoliciesStatement() (*ShowRetentionPoliciesStatement, error) {
-	stmt := &ShowRetentionPoliciesStatement{}
-
-	// Expect an "ON" keyword.
-	if tok, pos, lit := p.scanIgnoreWhitespace(); tok != ON {
-		return nil, newParseError(tokstr(tok, lit), []string{"ON"}, pos)
-	}
-
-	// Parse the database.
-	ident, err := p.parseIdent()
-	if err != nil {
-		return nil, err
-	}
-	stmt.Database = ident
-
-	return stmt, nil
-}
-
-// parseShowTagKeysStatement parses a string and returns a ShowSeriesStatement.
-// This function assumes the "SHOW TAG KEYS" tokens have already been consumed.
-func (p *Parser) parseShowTagKeysStatement() (*ShowTagKeysStatement, error) {
-	stmt := &ShowTagKeysStatement{}
-	var err error
-
-	// Parse optional source.
-	if tok, _, _ := p.scanIgnoreWhitespace(); tok == FROM {
-		if stmt.Sources, err = p.parseSources(); err != nil {
-			return nil, err
-		}
-	} else {
-		p.unscan()
-	}
-
-	// Parse condition: "WHERE EXPR".
-	if stmt.Condition, err = p.parseCondition(); err != nil {
-		return nil, err
-	}
-
-	// Parse sort: "ORDER BY FIELD+".
-	if stmt.SortFields, err = p.parseOrderBy(); err != nil {
-		return nil, err
-	}
-
-	// Parse limit: "LIMIT <n>".
-	if stmt.Limit, err = p.parseOptionalTokenAndInt(LIMIT); err != nil {
-		return nil, err
-	}
-
-	// Parse offset: "OFFSET <n>".
-	if stmt.Offset, err = p.parseOptionalTokenAndInt(OFFSET); err != nil {
-		return nil, err
-	}
-
-	// Parse series limit: "SLIMIT <n>".
-	if stmt.SLimit, err = p.parseOptionalTokenAndInt(SLIMIT); err != nil {
-		return nil, err
-	}
-
-	// Parse series offset: "SOFFSET <n>".
-	if stmt.SOffset, err = p.parseOptionalTokenAndInt(SOFFSET); err != nil {
-		return nil, err
-	}
-
-	return stmt, nil
-}
-
-// parseShowTagValuesStatement parses a string and returns a ShowSeriesStatement.
-// This function assumes the "SHOW TAG VALUES" tokens have already been consumed.
-func (p *Parser) parseShowTagValuesStatement() (*ShowTagValuesStatement, error) {
-	stmt := &ShowTagValuesStatement{}
-	var err error
-
-	// Parse optional source.
-	if tok, _, _ := p.scanIgnoreWhitespace(); tok == FROM {
-		if stmt.Sources, err = p.parseSources(); err != nil {
-			return nil, err
-		}
-	} else {
-		p.unscan()
-	}
-
-	// Parse required WITH KEY.
-	if stmt.TagKeys, err = p.parseTagKeys(); err != nil {
-		return nil, err
-	}
-
-	// Parse condition: "WHERE EXPR".
-	if stmt.Condition, err = p.parseCondition(); err != nil {
-		return nil, err
-	}
-
-	// Parse sort: "ORDER BY FIELD+".
-	if stmt.SortFields, err = p.parseOrderBy(); err != nil {
-		return nil, err
-	}
-
-	// Parse limit: "LIMIT <n>".
-	if stmt.Limit, err = p.parseOptionalTokenAndInt(LIMIT); err != nil {
-		return nil, err
-	}
-
-	// Parse offset: "OFFSET <n>".
-	if stmt.Offset, err = p.parseOptionalTokenAndInt(OFFSET); err != nil {
-		return nil, err
-	}
-
-	return stmt, nil
-}
-
-// parseTagKeys parses a string and returns a list of tag keys.
-func (p *Parser) parseTagKeys() ([]string, error) {
-	var err error
-
-	// Parse required WITH KEY tokens.
-	if err := p.parseTokens([]Token{WITH, KEY}); err != nil {
-		return nil, err
-	}
-
-	var tagKeys []string
-
-	// Parse required IN or EQ token.
-	if tok, pos, lit := p.scanIgnoreWhitespace(); tok == IN {
-		// Parse required ( token.
-		if tok, pos, lit = p.scanIgnoreWhitespace(); tok != LPAREN {
-			return nil, newParseError(tokstr(tok, lit), []string{"("}, pos)
-		}
-
-		// Parse tag key list.
-		if tagKeys, err = p.parseIdentList(); err != nil {
-			return nil, err
-		}
-
-		// Parse required ) token.
-		if tok, pos, lit = p.scanIgnoreWhitespace(); tok != RPAREN {
-			return nil, newParseError(tokstr(tok, lit), []string{")"}, pos)
-		}
-	} else if tok == EQ {
-		// Parse required tag key.
-		ident, err := p.parseIdent()
-		if err != nil {
-			return nil, err
-		}
-		tagKeys = append(tagKeys, ident)
-	} else {
-		return nil, newParseError(tokstr(tok, lit), []string{"IN", "="}, pos)
-	}
-
-	return tagKeys, nil
-}
-
-// parseShowUsersStatement parses a string and returns a ShowUsersStatement.
-// This function assumes the "SHOW USERS" tokens have been consumed.
-func (p *Parser) parseShowUsersStatement() (*ShowUsersStatement, error) {
-	return &ShowUsersStatement{}, nil
-}
-
-// parseShowSubscriptionsStatement parses a string and returns a ShowSubscriptionsStatement
-// This function assumes the "SHOW SUBSCRIPTIONS" tokens have been consumed.
-func (p *Parser) parseShowSubscriptionsStatement() (*ShowSubscriptionsStatement, error) {
-	stmt := &ShowSubscriptionsStatement{}
-	return stmt, nil
-}
-
-// parseShowFieldKeysStatement parses a string and returns a ShowSeriesStatement.
-// This function assumes the "SHOW FIELD KEYS" tokens have already been consumed.
-func (p *Parser) parseShowFieldKeysStatement() (*ShowFieldKeysStatement, error) {
-	stmt := &ShowFieldKeysStatement{}
-	var err error
-
-	// Parse optional source.
-	if tok, _, _ := p.scanIgnoreWhitespace(); tok == FROM {
-		if stmt.Sources, err = p.parseSources(); err != nil {
-			return nil, err
-		}
-	} else {
-		p.unscan()
-	}
-
-	// Parse sort: "ORDER BY FIELD+".
-	if stmt.SortFields, err = p.parseOrderBy(); err != nil {
-		return nil, err
-	}
-
-	// Parse limit: "LIMIT <n>".
-	if stmt.Limit, err = p.parseOptionalTokenAndInt(LIMIT); err != nil {
-		return nil, err
-	}
-
-	// Parse offset: "OFFSET <n>".
-	if stmt.Offset, err = p.parseOptionalTokenAndInt(OFFSET); err != nil {
-		return nil, err
-	}
-
-	return stmt, nil
-}
-
-// parseDropMeasurementStatement parses a string and returns a DropMeasurementStatement.
-// This function assumes the "DROP MEASUREMENT" tokens have already been consumed.
-func (p *Parser) parseDropMeasurementStatement() (*DropMeasurementStatement, error) {
-	stmt := &DropMeasurementStatement{}
-
-	// Parse the name of the measurement to be dropped.
-	lit, err := p.parseIdent()
-	if err != nil {
-		return nil, err
-	}
-	stmt.Name = lit
-
-	return stmt, nil
-}
-
-// parseDropSeriesStatement parses a string and returns a DropSeriesStatement.
-// This function assumes the "DROP SERIES" tokens have already been consumed.
-func (p *Parser) parseDropSeriesStatement() (*DropSeriesStatement, error) {
-	stmt := &DropSeriesStatement{}
-	var err error
-
-	tok, pos, lit := p.scanIgnoreWhitespace()
+	tok, pos, lit := p.ScanIgnoreWhitespace()
 
 	if tok == FROM {
 		// Parse source.
-		if stmt.Sources, err = p.parseSources(); err != nil {
+		if stmt.Sources, err = p.parseSources(false); err != nil {
 			return nil, err
 		}
+
+		var err error
+		WalkFunc(stmt.Sources, func(n Node) {
+			if t, ok := n.(*Measurement); ok {
+				// Don't allow database or retention policy in from clause for delete
+				// statement.  They apply to the selected database across all retention
+				// policies.
+				if t.Database != "" {
+					err = &ParseError{Message: "database not supported"}
+				}
+				if t.RetentionPolicy != "" {
+					err = &ParseError{Message: "retention policy not supported"}
+				}
+			}
+		})
+		if err != nil {
+			return nil, err
+		}
+
 	} else {
-		p.unscan()
+		p.Unscan()
 	}
 
 	// Parse condition: "WHERE EXPR".
@@ -1316,40 +896,728 @@ func (p *Parser) parseDropSeriesStatement() (*DropSeriesStatement, error) {
 	return stmt, nil
 }
 
-// parseDropServerStatement parses a string and returns a DropServerStatement.
-// This function assumes the "DROP <META|DATA>" tokens have already been consumed.
-func (p *Parser) parseDropServerStatement(tok Token) (*DropServerStatement, error) {
-	// Parse the SERVER token
-	if tok, pos, lit := p.scanIgnoreWhitespace(); tok != SERVER {
-		return nil, newParseError(tokstr(tok, lit), []string{"SERVER"}, pos)
+// parseShowSeriesStatement parses a string and returns a Statement.
+// This function assumes the "SHOW SERIES" tokens have already been consumed.
+func (p *Parser) parseShowSeriesStatement() (Statement, error) {
+	var exactCardinality bool
+	if tok, _, _ := p.ScanIgnoreWhitespace(); tok == EXACT {
+		exactCardinality = true
+	} else {
+		p.Unscan()
 	}
 
-	s := &DropServerStatement{}
+	if tok, _, _ := p.ScanIgnoreWhitespace(); tok == CARDINALITY {
+		return p.parseShowSeriesCardinalityStatement(exactCardinality)
+	}
+	p.Unscan()
+
+	// Handle SHOW SERIES statments.
+
+	stmt := &ShowSeriesStatement{}
 	var err error
 
-	if tok == META {
-		s.Meta = true
+	// Parse optional ON clause.
+	if tok, _, _ := p.ScanIgnoreWhitespace(); tok == ON {
+		// Parse the database.
+		stmt.Database, err = p.ParseIdent()
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		p.Unscan()
 	}
 
-	// Parse the server's ID.
-	if s.NodeID, err = p.parseUInt64(); err != nil {
+	// Parse optional FROM.
+	if tok, _, _ := p.ScanIgnoreWhitespace(); tok == FROM {
+		if stmt.Sources, err = p.parseSources(false); err != nil {
+			return nil, err
+		}
+	} else {
+		p.Unscan()
+	}
+
+	// Parse condition: "WHERE EXPR".
+	if stmt.Condition, err = p.parseCondition(); err != nil {
 		return nil, err
 	}
 
-	return s, nil
+	// Parse sort: "ORDER BY FIELD+".
+	if stmt.SortFields, err = p.parseOrderBy(); err != nil {
+		return nil, err
+	}
+
+	// Parse limit: "LIMIT <n>".
+	if stmt.Limit, err = p.ParseOptionalTokenAndInt(LIMIT); err != nil {
+		return nil, err
+	}
+
+	// Parse offset: "OFFSET <n>".
+	if stmt.Offset, err = p.ParseOptionalTokenAndInt(OFFSET); err != nil {
+		return nil, err
+	}
+
+	return stmt, nil
+}
+
+// This function assumes the "SHOW SERIES EXACT CARDINALITY" or the
+// "SHOW SERIES CARDINALITY" tokens have already been consumed.
+func (p *Parser) parseShowSeriesCardinalityStatement(exact bool) (Statement, error) {
+	var err error
+	stmt := &ShowSeriesCardinalityStatement{Exact: exact}
+
+	// Parse optional ON clause.
+	if tok, _, _ := p.ScanIgnoreWhitespace(); tok == ON {
+		if stmt.Database, err = p.ParseIdent(); err != nil {
+			return nil, err
+		}
+	} else {
+		p.Unscan()
+	}
+
+	// Parse optional FROM.
+	if tok, _, _ := p.ScanIgnoreWhitespace(); tok == FROM {
+		if stmt.Sources, err = p.parseSources(false); err != nil {
+			return nil, err
+		}
+	} else {
+		p.Unscan()
+	}
+
+	// Parse condition: "WHERE EXPR".
+	if stmt.Condition, err = p.parseCondition(); err != nil {
+		return nil, err
+	}
+
+	// Parse dimensions: "GROUP BY DIMENSION+".
+	if stmt.Dimensions, err = p.parseDimensions(); err != nil {
+		return nil, err
+	}
+
+	// Parse limit & offset: "LIMIT <n>", "OFFSET <n>".
+	if stmt.Limit, err = p.ParseOptionalTokenAndInt(LIMIT); err != nil {
+		return nil, err
+	} else if stmt.Offset, err = p.ParseOptionalTokenAndInt(OFFSET); err != nil {
+		return nil, err
+	}
+
+	return stmt, nil
+}
+
+// This function assumes the "SHOW MEASUREMENT" tokens have already been consumed.
+func (p *Parser) parseShowMeasurementCardinalityStatement(exact bool) (Statement, error) {
+	stmt := &ShowMeasurementCardinalityStatement{Exact: exact}
+
+	if stmt.Exact {
+		// Parse remaining CARDINALITY token
+		if tok, pos, lit := p.ScanIgnoreWhitespace(); tok != CARDINALITY {
+			return nil, newParseError(tokstr(tok, lit), []string{"CARDINALITY"}, pos)
+		}
+	}
+
+	// Parse optional ON clause.
+	var err error
+	if tok, _, _ := p.ScanIgnoreWhitespace(); tok == ON {
+		if stmt.Database, err = p.ParseIdent(); err != nil {
+			return nil, err
+		}
+	} else {
+		p.Unscan()
+	}
+
+	// Parse optional FROM.
+	if tok, _, _ := p.ScanIgnoreWhitespace(); tok == FROM {
+		if stmt.Sources, err = p.parseSources(false); err != nil {
+			return nil, err
+		}
+	} else {
+		p.Unscan()
+	}
+
+	// Parse condition: "WHERE EXPR".
+	if stmt.Condition, err = p.parseCondition(); err != nil {
+		return nil, err
+	}
+
+	// Parse dimensions: "GROUP BY DIMENSION+".
+	if stmt.Dimensions, err = p.parseDimensions(); err != nil {
+		return nil, err
+	}
+
+	// Parse limit & offset: "LIMIT <n>", "OFFSET <n>".
+	if stmt.Limit, err = p.ParseOptionalTokenAndInt(LIMIT); err != nil {
+		return nil, err
+	} else if stmt.Offset, err = p.ParseOptionalTokenAndInt(OFFSET); err != nil {
+		return nil, err
+	}
+
+	return stmt, nil
+}
+
+// parseShowMeasurementsStatement parses a string and returns a Statement.
+// This function assumes the "SHOW MEASUREMENTS" tokens have already been consumed.
+func (p *Parser) parseShowMeasurementsStatement() (*ShowMeasurementsStatement, error) {
+	stmt := &ShowMeasurementsStatement{}
+	var err error
+
+	// Parse optional ON clause.
+	if tok, _, _ := p.ScanIgnoreWhitespace(); tok == ON {
+		// Parse the database.
+		stmt.Database, err = p.ParseIdent()
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		p.Unscan()
+	}
+
+	// Parse optional WITH clause.
+	if tok, _, _ := p.ScanIgnoreWhitespace(); tok == WITH {
+		// Parse required MEASUREMENT token.
+		if err := p.parseTokens([]Token{MEASUREMENT}); err != nil {
+			return nil, err
+		}
+
+		// Parse required operator: = or =~.
+		tok, pos, lit := p.ScanIgnoreWhitespace()
+		switch tok {
+		case EQ, EQREGEX:
+			// Parse required source (measurement name or regex).
+			if stmt.Source, err = p.parseSource(false); err != nil {
+				return nil, err
+			}
+		default:
+			return nil, newParseError(tokstr(tok, lit), []string{"=", "=~"}, pos)
+		}
+	} else {
+		// Not a WITH clause so put the token back.
+		p.Unscan()
+	}
+
+	// Parse condition: "WHERE EXPR".
+	if stmt.Condition, err = p.parseCondition(); err != nil {
+		return nil, err
+	}
+
+	// Parse sort: "ORDER BY FIELD+".
+	if stmt.SortFields, err = p.parseOrderBy(); err != nil {
+		return nil, err
+	}
+
+	// Parse limit: "LIMIT <n>".
+	if stmt.Limit, err = p.ParseOptionalTokenAndInt(LIMIT); err != nil {
+		return nil, err
+	}
+
+	// Parse offset: "OFFSET <n>".
+	if stmt.Offset, err = p.ParseOptionalTokenAndInt(OFFSET); err != nil {
+		return nil, err
+	}
+
+	return stmt, nil
+}
+
+// parseShowQueriesStatement parses a string and returns a ShowQueriesStatement.
+// This function assumes the "SHOW QUERIES" tokens have been consumed.
+func (p *Parser) parseShowQueriesStatement() (*ShowQueriesStatement, error) {
+	return &ShowQueriesStatement{}, nil
+}
+
+// parseShowRetentionPoliciesStatement parses a string and returns a ShowRetentionPoliciesStatement.
+// This function assumes the "SHOW RETENTION POLICIES" tokens have been consumed.
+func (p *Parser) parseShowRetentionPoliciesStatement() (*ShowRetentionPoliciesStatement, error) {
+	stmt := &ShowRetentionPoliciesStatement{}
+
+	// Expect an "ON" keyword.
+	if tok, _, _ := p.ScanIgnoreWhitespace(); tok == ON {
+		// Parse the database.
+		ident, err := p.ParseIdent()
+		if err != nil {
+			return nil, err
+		}
+		stmt.Database = ident
+	} else {
+		p.Unscan()
+	}
+
+	return stmt, nil
+}
+
+// This function assumes the "SHOW TAG KEY" tokens have already been consumed.
+func (p *Parser) parseShowTagKeyCardinalityStatement() (Statement, error) {
+	var err error
+	var exactCardinality bool
+	requiredTokens := []string{"EXACT", "CARDINALITY"}
+	if tok, _, _ := p.ScanIgnoreWhitespace(); tok == EXACT {
+		exactCardinality = true
+		requiredTokens = requiredTokens[1:]
+	} else {
+		p.Unscan()
+	}
+
+	stmt := &ShowTagKeyCardinalityStatement{Exact: exactCardinality}
+
+	// Parse remaining CARDINALITY token
+	if tok, pos, lit := p.ScanIgnoreWhitespace(); tok != CARDINALITY {
+		return nil, newParseError(tokstr(tok, lit), requiredTokens, pos)
+	}
+
+	// Parse optional ON clause.
+	if tok, _, _ := p.ScanIgnoreWhitespace(); tok == ON {
+		if stmt.Database, err = p.ParseIdent(); err != nil {
+			return nil, err
+		}
+	} else {
+		p.Unscan()
+	}
+
+	// Parse optional FROM.
+	if tok, _, _ := p.ScanIgnoreWhitespace(); tok == FROM {
+		if stmt.Sources, err = p.parseSources(false); err != nil {
+			return nil, err
+		}
+	} else {
+		p.Unscan()
+	}
+
+	// Parse condition: "WHERE EXPR".
+	if stmt.Condition, err = p.parseCondition(); err != nil {
+		return nil, err
+	}
+
+	// Parse dimensions: "GROUP BY DIMENSION+".
+	if stmt.Dimensions, err = p.parseDimensions(); err != nil {
+		return nil, err
+	}
+
+	// Parse limit & offset: "LIMIT <n>", "OFFSET <n>".
+	if stmt.Limit, err = p.ParseOptionalTokenAndInt(LIMIT); err != nil {
+		return nil, err
+	} else if stmt.Offset, err = p.ParseOptionalTokenAndInt(OFFSET); err != nil {
+		return nil, err
+	}
+
+	return stmt, nil
+}
+
+// parseShowTagKeysStatement parses a string and returns a Statement.
+// This function assumes the "SHOW TAG KEYS" tokens have already been consumed.
+func (p *Parser) parseShowTagKeysStatement() (*ShowTagKeysStatement, error) {
+	stmt := &ShowTagKeysStatement{}
+	var err error
+
+	// Parse optional ON clause.
+	if tok, _, _ := p.ScanIgnoreWhitespace(); tok == ON {
+		// Parse the database.
+		stmt.Database, err = p.ParseIdent()
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		p.Unscan()
+	}
+
+	// Parse optional source.
+	if tok, _, _ := p.ScanIgnoreWhitespace(); tok == FROM {
+		if stmt.Sources, err = p.parseSources(false); err != nil {
+			return nil, err
+		}
+	} else {
+		p.Unscan()
+	}
+
+	// Parse condition: "WHERE EXPR".
+	if stmt.Condition, err = p.parseCondition(); err != nil {
+		return nil, err
+	}
+
+	// Parse sort: "ORDER BY FIELD+".
+	if stmt.SortFields, err = p.parseOrderBy(); err != nil {
+		return nil, err
+	}
+
+	// Parse limit: "LIMIT <n>".
+	if stmt.Limit, err = p.ParseOptionalTokenAndInt(LIMIT); err != nil {
+		return nil, err
+	}
+
+	// Parse offset: "OFFSET <n>".
+	if stmt.Offset, err = p.ParseOptionalTokenAndInt(OFFSET); err != nil {
+		return nil, err
+	}
+
+	// Parse series limit: "SLIMIT <n>".
+	if stmt.SLimit, err = p.ParseOptionalTokenAndInt(SLIMIT); err != nil {
+		return nil, err
+	}
+
+	// Parse series offset: "SOFFSET <n>".
+	if stmt.SOffset, err = p.ParseOptionalTokenAndInt(SOFFSET); err != nil {
+		return nil, err
+	}
+
+	return stmt, nil
+}
+
+// parseShowTagValuesStatement parses a string and returns a Statement.
+// This function assumes the "SHOW TAG VALUES" tokens have already been consumed.
+func (p *Parser) parseShowTagValuesStatement() (Statement, error) {
+	stmt := &ShowTagValuesStatement{}
+	var err error
+
+	if tok, _, _ := p.ScanIgnoreWhitespace(); tok == EXACT {
+		return p.parseShowTagValuesCardinalityStatement(true)
+	} else if tok == CARDINALITY {
+		return p.parseShowTagValuesCardinalityStatement(false)
+	}
+	p.Unscan()
+
+	// Parse optional ON clause.
+	if tok, _, _ := p.ScanIgnoreWhitespace(); tok == ON {
+		// Parse the database.
+		stmt.Database, err = p.ParseIdent()
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		p.Unscan()
+	}
+
+	// Parse optional source.
+	if tok, _, _ := p.ScanIgnoreWhitespace(); tok == FROM {
+		if stmt.Sources, err = p.parseSources(false); err != nil {
+			return nil, err
+		}
+	} else {
+		p.Unscan()
+	}
+
+	// Parse required WITH KEY.
+	if stmt.Op, stmt.TagKeyExpr, err = p.parseTagKeyExpr(); err != nil {
+		return nil, err
+	}
+
+	// Parse condition: "WHERE EXPR".
+	if stmt.Condition, err = p.parseCondition(); err != nil {
+		return nil, err
+	}
+
+	// Parse sort: "ORDER BY FIELD+".
+	if stmt.SortFields, err = p.parseOrderBy(); err != nil {
+		return nil, err
+	}
+
+	// Parse limit: "LIMIT <n>".
+	if stmt.Limit, err = p.ParseOptionalTokenAndInt(LIMIT); err != nil {
+		return nil, err
+	}
+
+	// Parse offset: "OFFSET <n>".
+	if stmt.Offset, err = p.ParseOptionalTokenAndInt(OFFSET); err != nil {
+		return nil, err
+	}
+
+	return stmt, nil
+}
+
+// This function assumes the "SHOW TAG VALUES" tokens have already been consumed.
+func (p *Parser) parseShowTagValuesCardinalityStatement(exact bool) (Statement, error) {
+	var err error
+	stmt := &ShowTagValuesCardinalityStatement{Exact: exact}
+
+	if stmt.Exact {
+		// Parse remaining CARDINALITY token
+		if tok, pos, lit := p.ScanIgnoreWhitespace(); tok != CARDINALITY {
+			return nil, newParseError(tokstr(tok, lit), []string{"CARDINALITY"}, pos)
+		}
+	}
+
+	// Parse optional ON clause.
+	if tok, _, _ := p.ScanIgnoreWhitespace(); tok == ON {
+		if stmt.Database, err = p.ParseIdent(); err != nil {
+			return nil, err
+		}
+	} else {
+		p.Unscan()
+	}
+
+	// Parse optional FROM.
+	if tok, _, _ := p.ScanIgnoreWhitespace(); tok == FROM {
+		if stmt.Sources, err = p.parseSources(false); err != nil {
+			return nil, err
+		}
+	} else {
+		p.Unscan()
+	}
+
+	// Parse required WITH KEY.
+	if stmt.Op, stmt.TagKeyExpr, err = p.parseTagKeyExpr(); err != nil {
+		return nil, err
+	}
+
+	// Parse condition: "WHERE EXPR".
+	if stmt.Condition, err = p.parseCondition(); err != nil {
+		return nil, err
+	}
+
+	// Parse dimensions: "GROUP BY DIMENSION+".
+	if stmt.Dimensions, err = p.parseDimensions(); err != nil {
+		return nil, err
+	}
+
+	// Parse limit & offset: "LIMIT <n>", "OFFSET <n>".
+	if stmt.Limit, err = p.ParseOptionalTokenAndInt(LIMIT); err != nil {
+		return nil, err
+	} else if stmt.Offset, err = p.ParseOptionalTokenAndInt(OFFSET); err != nil {
+		return nil, err
+	}
+
+	return stmt, nil
+}
+
+// parseTagKeys parses a string and returns a list of tag keys.
+func (p *Parser) parseTagKeyExpr() (Token, Literal, error) {
+	var err error
+
+	// Parse required WITH KEY tokens.
+	if err := p.parseTokens([]Token{WITH, KEY}); err != nil {
+		return 0, nil, err
+	}
+
+	// Parse required IN, EQ, or EQREGEX token.
+	tok, pos, lit := p.ScanIgnoreWhitespace()
+	if tok == IN {
+		// Parse required ( token.
+		if tok, pos, lit = p.ScanIgnoreWhitespace(); tok != LPAREN {
+			return 0, nil, newParseError(tokstr(tok, lit), []string{"("}, pos)
+		}
+
+		// Parse tag key list.
+		var tagKeys []string
+		if tagKeys, err = p.ParseIdentList(); err != nil {
+			return 0, nil, err
+		}
+
+		// Parse required ) token.
+		if tok, pos, lit = p.ScanIgnoreWhitespace(); tok != RPAREN {
+			return 0, nil, newParseError(tokstr(tok, lit), []string{")"}, pos)
+		}
+		return IN, &ListLiteral{Vals: tagKeys}, nil
+	} else if tok == EQ || tok == NEQ {
+		// Parse required tag key.
+		ident, err := p.ParseIdent()
+		if err != nil {
+			return 0, nil, err
+		}
+		return tok, &StringLiteral{Val: ident}, nil
+	} else if tok == EQREGEX || tok == NEQREGEX {
+		re, err := p.parseRegex()
+		if err != nil {
+			return 0, nil, err
+		} else if re == nil {
+			// parseRegex can return an empty type, but we need it to be present
+			tok, pos, lit := p.ScanIgnoreWhitespace()
+			return 0, nil, newParseError(tokstr(tok, lit), []string{"regex"}, pos)
+		}
+		return tok, re, nil
+	}
+	return 0, nil, newParseError(tokstr(tok, lit), []string{"IN", "=", "=~"}, pos)
+}
+
+// parseShowUsersStatement parses a string and returns a ShowUsersStatement.
+// This function assumes the "SHOW USERS" tokens have been consumed.
+func (p *Parser) parseShowUsersStatement() (*ShowUsersStatement, error) {
+	return &ShowUsersStatement{}, nil
+}
+
+// parseShowSubscriptionsStatement parses a string and returns a ShowSubscriptionsStatement
+// This function assumes the "SHOW SUBSCRIPTIONS" tokens have been consumed.
+func (p *Parser) parseShowSubscriptionsStatement() (*ShowSubscriptionsStatement, error) {
+	stmt := &ShowSubscriptionsStatement{}
+	return stmt, nil
+}
+
+// This function assumes the "SHOW FIELD KEY" tokens have already been consumed.
+func (p *Parser) parseShowFieldKeyCardinalityStatement() (Statement, error) {
+	var err error
+	var exactCardinality bool
+	requiredTokens := []string{"EXACT", "CARDINALITY"}
+	if tok, _, _ := p.ScanIgnoreWhitespace(); tok == EXACT {
+		exactCardinality = true
+		requiredTokens = requiredTokens[1:]
+	} else {
+		p.Unscan()
+	}
+
+	stmt := &ShowFieldKeyCardinalityStatement{Exact: exactCardinality}
+
+	// Parse remaining CARDINALITY token
+	if tok, pos, lit := p.ScanIgnoreWhitespace(); tok != CARDINALITY {
+		return nil, newParseError(tokstr(tok, lit), requiredTokens, pos)
+	}
+
+	// Parse optional ON clause.
+	if tok, _, _ := p.ScanIgnoreWhitespace(); tok == ON {
+		if stmt.Database, err = p.ParseIdent(); err != nil {
+			return nil, err
+		}
+	} else {
+		p.Unscan()
+	}
+
+	// Parse optional FROM.
+	if tok, _, _ := p.ScanIgnoreWhitespace(); tok == FROM {
+		if stmt.Sources, err = p.parseSources(false); err != nil {
+			return nil, err
+		}
+	} else {
+		p.Unscan()
+	}
+
+	// Parse condition: "WHERE EXPR".
+	if stmt.Condition, err = p.parseCondition(); err != nil {
+		return nil, err
+	}
+
+	// Parse dimensions: "GROUP BY DIMENSION+".
+	if stmt.Dimensions, err = p.parseDimensions(); err != nil {
+		return nil, err
+	}
+
+	// Parse limit & offset: "LIMIT <n>", "OFFSET <n>".
+	if stmt.Limit, err = p.ParseOptionalTokenAndInt(LIMIT); err != nil {
+		return nil, err
+	} else if stmt.Offset, err = p.ParseOptionalTokenAndInt(OFFSET); err != nil {
+		return nil, err
+	}
+
+	return stmt, nil
+}
+
+// parseShowFieldKeysStatement parses a string and returns a Statement.
+// This function assumes the "SHOW FIELD KEYS" tokens have already been consumed.
+func (p *Parser) parseShowFieldKeysStatement() (*ShowFieldKeysStatement, error) {
+	stmt := &ShowFieldKeysStatement{}
+	var err error
+
+	// Parse optional ON clause.
+	if tok, _, _ := p.ScanIgnoreWhitespace(); tok == ON {
+		// Parse the database.
+		stmt.Database, err = p.ParseIdent()
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		p.Unscan()
+	}
+
+	// Parse optional source.
+	if tok, _, _ := p.ScanIgnoreWhitespace(); tok == FROM {
+		if stmt.Sources, err = p.parseSources(false); err != nil {
+			return nil, err
+		}
+	} else {
+		p.Unscan()
+	}
+
+	// Parse sort: "ORDER BY FIELD+".
+	if stmt.SortFields, err = p.parseOrderBy(); err != nil {
+		return nil, err
+	}
+
+	// Parse limit: "LIMIT <n>".
+	if stmt.Limit, err = p.ParseOptionalTokenAndInt(LIMIT); err != nil {
+		return nil, err
+	}
+
+	// Parse offset: "OFFSET <n>".
+	if stmt.Offset, err = p.ParseOptionalTokenAndInt(OFFSET); err != nil {
+		return nil, err
+	}
+
+	return stmt, nil
+}
+
+// parseDropMeasurementStatement parses a string and returns a DropMeasurementStatement.
+// This function assumes the "DROP MEASUREMENT" tokens have already been consumed.
+func (p *Parser) parseDropMeasurementStatement() (*DropMeasurementStatement, error) {
+	stmt := &DropMeasurementStatement{}
+
+	// Parse the name of the measurement to be dropped.
+	lit, err := p.ParseIdent()
+	if err != nil {
+		return nil, err
+	}
+	stmt.Name = lit
+
+	return stmt, nil
+}
+
+// parseDropSeriesStatement parses a string and returns a DropSeriesStatement.
+// This function assumes the "DROP SERIES" tokens have already been consumed.
+func (p *Parser) parseDropSeriesStatement() (*DropSeriesStatement, error) {
+	stmt := &DropSeriesStatement{}
+	var err error
+
+	tok, pos, lit := p.ScanIgnoreWhitespace()
+
+	if tok == FROM {
+		// Parse source.
+		if stmt.Sources, err = p.parseSources(false); err != nil {
+			return nil, err
+		}
+
+		var err error
+		WalkFunc(stmt.Sources, func(n Node) {
+			if t, ok := n.(*Measurement); ok {
+				// Don't allow database or retention policy in from clause for delete
+				// statement.  They apply to the selected database across all retention
+				// policies.
+				if t.Database != "" {
+					err = &ParseError{Message: "database not supported"}
+				}
+				if t.RetentionPolicy != "" {
+					err = &ParseError{Message: "retention policy not supported"}
+				}
+			}
+		})
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		p.Unscan()
+	}
+
+	// Parse condition: "WHERE EXPR".
+	if stmt.Condition, err = p.parseCondition(); err != nil {
+		return nil, err
+	}
+
+	// If they didn't provide a FROM or a WHERE, this query is invalid
+	if stmt.Condition == nil && stmt.Sources == nil {
+		return nil, newParseError(tokstr(tok, lit), []string{"FROM", "WHERE"}, pos)
+	}
+
+	return stmt, nil
+}
+
+// parseDropShardStatement parses a string and returns a
+// DropShardStatement. This function assumes the "DROP SHARD" tokens
+// have already been consumed.
+func (p *Parser) parseDropShardStatement() (*DropShardStatement, error) {
+	var err error
+	stmt := &DropShardStatement{}
+
+	// Parse the ID of the shard to be dropped.
+	if stmt.ID, err = p.ParseUInt64(); err != nil {
+		return nil, err
+	}
+	return stmt, nil
 }
 
 // parseShowContinuousQueriesStatement parses a string and returns a ShowContinuousQueriesStatement.
 // This function assumes the "SHOW CONTINUOUS" tokens have already been consumed.
 func (p *Parser) parseShowContinuousQueriesStatement() (*ShowContinuousQueriesStatement, error) {
-	stmt := &ShowContinuousQueriesStatement{}
-
-	// Expect a "QUERIES" token.
-	if tok, pos, lit := p.scanIgnoreWhitespace(); tok != QUERIES {
-		return nil, newParseError(tokstr(tok, lit), []string{"QUERIES"}, pos)
-	}
-
-	return stmt, nil
+	return &ShowContinuousQueriesStatement{}, nil
 }
 
 // parseShowServersStatement parses a string and returns a ShowServersStatement.
@@ -1364,13 +1632,8 @@ func (p *Parser) parseShowServersStatement() (*ShowServersStatement, error) {
 func (p *Parser) parseGrantsForUserStatement() (*ShowGrantsForUserStatement, error) {
 	stmt := &ShowGrantsForUserStatement{}
 
-	// Expect a "FOR" token.
-	if tok, pos, lit := p.scanIgnoreWhitespace(); tok != FOR {
-		return nil, newParseError(tokstr(tok, lit), []string{"FOR"}, pos)
-	}
-
 	// Parse the name of the user to be displayed.
-	lit, err := p.parseIdent()
+	lit, err := p.ParseIdent()
 	if err != nil {
 		return nil, err
 	}
@@ -1382,8 +1645,7 @@ func (p *Parser) parseGrantsForUserStatement() (*ShowGrantsForUserStatement, err
 // parseShowDatabasesStatement parses a string and returns a ShowDatabasesStatement.
 // This function assumes the "SHOW DATABASE" tokens have already been consumed.
 func (p *Parser) parseShowDatabasesStatement() (*ShowDatabasesStatement, error) {
-	stmt := &ShowDatabasesStatement{}
-	return stmt, nil
+	return &ShowDatabasesStatement{}, nil
 }
 
 // parseCreateContinuousQueriesStatement parses a string and returns a CreateContinuousQueryStatement.
@@ -1391,34 +1653,31 @@ func (p *Parser) parseShowDatabasesStatement() (*ShowDatabasesStatement, error) 
 func (p *Parser) parseCreateContinuousQueryStatement() (*CreateContinuousQueryStatement, error) {
 	stmt := &CreateContinuousQueryStatement{}
 
-	// Expect a "QUERY" token.
-	if tok, pos, lit := p.scanIgnoreWhitespace(); tok != QUERY {
-		return nil, newParseError(tokstr(tok, lit), []string{"QUERY"}, pos)
-	}
-
 	// Read the id of the query to create.
-	ident, err := p.parseIdent()
+	ident, err := p.ParseIdent()
 	if err != nil {
 		return nil, err
 	}
 	stmt.Name = ident
 
 	// Expect an "ON" keyword.
-	if tok, pos, lit := p.scanIgnoreWhitespace(); tok != ON {
+	if tok, pos, lit := p.ScanIgnoreWhitespace(); tok != ON {
 		return nil, newParseError(tokstr(tok, lit), []string{"ON"}, pos)
 	}
 
 	// Read the name of the database to create the query on.
-	if ident, err = p.parseIdent(); err != nil {
+	if ident, err = p.ParseIdent(); err != nil {
 		return nil, err
 	}
 	stmt.Database = ident
 
-	if p.parseTokenMaybe(RESAMPLE) {
+	if tok, _, _ := p.ScanIgnoreWhitespace(); tok == RESAMPLE {
 		stmt.ResampleEvery, stmt.ResampleFor, err = p.parseResample()
 		if err != nil {
 			return nil, err
 		}
+	} else {
+		p.Unscan()
 	}
 
 	// Expect a "BEGIN SELECT" tokens.
@@ -1438,9 +1697,9 @@ func (p *Parser) parseCreateContinuousQueryStatement() (*CreateContinuousQuerySt
 		d, err := source.GroupByInterval()
 		if d == 0 || err != nil {
 			// rewind so we can output an error with some info
-			p.unscan() // unscan the whitespace
-			p.unscan() // unscan the last token
-			tok, pos, lit := p.scanIgnoreWhitespace()
+			p.Unscan() // Unscan the whitespace
+			p.Unscan() // Unscan the last token
+			tok, pos, lit := p.ScanIgnoreWhitespace()
 			expected := []string{"GROUP BY time(...)"}
 			if err != nil {
 				expected = append(expected, err.Error())
@@ -1450,7 +1709,7 @@ func (p *Parser) parseCreateContinuousQueryStatement() (*CreateContinuousQuerySt
 	}
 
 	// Expect a "END" keyword.
-	if tok, pos, lit := p.scanIgnoreWhitespace(); tok != END {
+	if tok, pos, lit := p.ScanIgnoreWhitespace(); tok != END {
 		return nil, newParseError(tokstr(tok, lit), []string{"END"}, pos)
 	}
 
@@ -1466,75 +1725,75 @@ func (p *Parser) parseCreateContinuousQueryStatement() (*CreateContinuousQuerySt
 func (p *Parser) parseCreateDatabaseStatement() (*CreateDatabaseStatement, error) {
 	stmt := &CreateDatabaseStatement{}
 
-	// Look for "IF NOT EXISTS"
-	if tok, _, _ := p.scanIgnoreWhitespace(); tok == IF {
-		if err := p.parseTokens([]Token{NOT, EXISTS}); err != nil {
-			return nil, err
-		}
-		stmt.IfNotExists = true
-	} else {
-		p.unscan()
-	}
-
 	// Parse the name of the database to be created.
-	lit, err := p.parseIdent()
+	lit, err := p.ParseIdent()
 	if err != nil {
 		return nil, err
 	}
 	stmt.Name = lit
 
 	// Look for "WITH"
-	if tok, _, _ := p.scanIgnoreWhitespace(); tok == WITH {
-		// validate that at least one of DURATION, REPLICATION or NAME is provided
-		tok, pos, lit := p.scanIgnoreWhitespace()
-		if tok != DURATION && tok != REPLICATION && tok != NAME {
-			return nil, newParseError(tokstr(tok, lit), []string{"DURATION", "REPLICATION", "NAME"}, pos)
+	if tok, _, _ := p.ScanIgnoreWhitespace(); tok == WITH {
+		// validate that at least one of DURATION, NAME, REPLICATION or SHARD is provided
+		tok, pos, lit := p.ScanIgnoreWhitespace()
+		if tok != DURATION && tok != NAME && tok != REPLICATION && tok != SHARD {
+			return nil, newParseError(tokstr(tok, lit), []string{"DURATION", "NAME", "REPLICATION", "SHARD"}, pos)
 		}
 		// rewind
-		p.unscan()
+		p.Unscan()
 
 		// mark statement as having a RetentionPolicyInfo defined
 		stmt.RetentionPolicyCreate = true
 
 		// Look for "DURATION"
-		var rpDuration time.Duration // default is forever
 		if err := p.parseTokens([]Token{DURATION}); err != nil {
-			p.unscan()
+			p.Unscan()
 		} else {
-			rpDuration, err = p.parseDuration()
+			rpDuration, err := p.ParseDuration()
 			if err != nil {
 				return nil, err
 			}
+			stmt.RetentionPolicyDuration = &rpDuration
 		}
-		stmt.RetentionPolicyDuration = rpDuration
 
 		// Look for "REPLICATION"
-		var rpReplication = 1 // default is 1
 		if err := p.parseTokens([]Token{REPLICATION}); err != nil {
-			p.unscan()
+			p.Unscan()
 		} else {
-			rpReplication, err = p.parseInt(1, math.MaxInt32)
+			rpReplication, err := p.ParseInt(1, math.MaxInt32)
+			if err != nil {
+				return nil, err
+			}
+			stmt.RetentionPolicyReplication = &rpReplication
+		}
+
+		// Look for "SHARD"
+		if err := p.parseTokens([]Token{SHARD}); err != nil {
+			p.Unscan()
+		} else {
+			// Look for "DURATION"
+			tok, pos, lit := p.ScanIgnoreWhitespace()
+			if tok != DURATION {
+				return nil, newParseError(tokstr(tok, lit), []string{"DURATION"}, pos)
+			}
+			stmt.RetentionPolicyShardGroupDuration, err = p.ParseDuration()
 			if err != nil {
 				return nil, err
 			}
 		}
-		stmt.RetentionPolicyReplication = rpReplication
 
 		// Look for "NAME"
-		var rpName string = "default" // default is default
 		if err := p.parseTokens([]Token{NAME}); err != nil {
-			p.unscan()
+			p.Unscan()
 		} else {
-			rpName, err = p.parseIdent()
+			stmt.RetentionPolicyName, err = p.ParseIdent()
 			if err != nil {
 				return nil, err
 			}
 		}
-		stmt.RetentionPolicyName = rpName
 	} else {
-		p.unscan()
+		p.Unscan()
 	}
-
 	return stmt, nil
 }
 
@@ -1543,18 +1802,8 @@ func (p *Parser) parseCreateDatabaseStatement() (*CreateDatabaseStatement, error
 func (p *Parser) parseDropDatabaseStatement() (*DropDatabaseStatement, error) {
 	stmt := &DropDatabaseStatement{}
 
-	// Look for "IF EXISTS"
-	if tok, _, _ := p.scanIgnoreWhitespace(); tok == IF {
-		if err := p.parseTokens([]Token{EXISTS}); err != nil {
-			return nil, err
-		}
-		stmt.IfExists = true
-	} else {
-		p.unscan()
-	}
-
 	// Parse the name of the database to be dropped.
-	lit, err := p.parseIdent()
+	lit, err := p.ParseIdent()
 	if err != nil {
 		return nil, err
 	}
@@ -1569,29 +1818,29 @@ func (p *Parser) parseDropSubscriptionStatement() (*DropSubscriptionStatement, e
 	stmt := &DropSubscriptionStatement{}
 
 	// Read the id of the subscription to drop.
-	ident, err := p.parseIdent()
+	ident, err := p.ParseIdent()
 	if err != nil {
 		return nil, err
 	}
 	stmt.Name = ident
 
 	// Expect an "ON" keyword.
-	if tok, pos, lit := p.scanIgnoreWhitespace(); tok != ON {
+	if tok, pos, lit := p.ScanIgnoreWhitespace(); tok != ON {
 		return nil, newParseError(tokstr(tok, lit), []string{"ON"}, pos)
 	}
 
 	// Read the name of the database.
-	if ident, err = p.parseIdent(); err != nil {
+	if ident, err = p.ParseIdent(); err != nil {
 		return nil, err
 	}
 	stmt.Database = ident
 
-	if tok, pos, lit := p.scan(); tok != DOT {
+	if tok, pos, lit := p.Scan(); tok != DOT {
 		return nil, newParseError(tokstr(tok, lit), []string{"."}, pos)
 	}
 
 	// Read the name of the retention policy.
-	if ident, err = p.parseIdent(); err != nil {
+	if ident, err = p.ParseIdent(); err != nil {
 		return nil, err
 	}
 	stmt.RetentionPolicy = ident
@@ -1605,19 +1854,19 @@ func (p *Parser) parseDropRetentionPolicyStatement() (*DropRetentionPolicyStatem
 	stmt := &DropRetentionPolicyStatement{}
 
 	// Parse the policy name.
-	ident, err := p.parseIdent()
+	ident, err := p.ParseIdent()
 	if err != nil {
 		return nil, err
 	}
 	stmt.Name = ident
 
 	// Consume the required ON token.
-	if tok, pos, lit := p.scanIgnoreWhitespace(); tok != ON {
+	if tok, pos, lit := p.ScanIgnoreWhitespace(); tok != ON {
 		return nil, newParseError(tokstr(tok, lit), []string{"ON"}, pos)
 	}
 
 	// Parse the database name.
-	if stmt.Database, err = p.parseIdent(); err != nil {
+	if stmt.Database, err = p.ParseIdent(); err != nil {
 		return nil, err
 	}
 
@@ -1630,7 +1879,7 @@ func (p *Parser) parseCreateUserStatement() (*CreateUserStatement, error) {
 	stmt := &CreateUserStatement{}
 
 	// Parse name of the user to be created.
-	ident, err := p.parseIdent()
+	ident, err := p.ParseIdent()
 	if err != nil {
 		return nil, err
 	}
@@ -1648,8 +1897,8 @@ func (p *Parser) parseCreateUserStatement() (*CreateUserStatement, error) {
 	stmt.Password = ident
 
 	// Check for option WITH clause.
-	if tok, _, _ := p.scanIgnoreWhitespace(); tok != WITH {
-		p.unscan()
+	if tok, _, _ := p.ScanIgnoreWhitespace(); tok != WITH {
+		p.Unscan()
 		return stmt, nil
 	}
 
@@ -1669,7 +1918,7 @@ func (p *Parser) parseDropUserStatement() (*DropUserStatement, error) {
 	stmt := &DropUserStatement{}
 
 	// Parse the name of the user to be dropped.
-	lit, err := p.parseIdent()
+	lit, err := p.ParseIdent()
 	if err != nil {
 		return nil, err
 	}
@@ -1678,35 +1927,27 @@ func (p *Parser) parseDropUserStatement() (*DropUserStatement, error) {
 	return stmt, nil
 }
 
-// parseRetentionPolicy parses a string and returns a retention policy name.
-// This function assumes the "WITH" token has already been consumed.
-func (p *Parser) parseRetentionPolicy() (name string, dfault bool, err error) {
-	// Check for optional DEFAULT token.
-	tok, pos, lit := p.scanIgnoreWhitespace()
-	if tok == DEFAULT {
-		dfault = true
-		tok, pos, lit = p.scanIgnoreWhitespace()
+// parseExplainStatement parses a string and return an ExplainStatement.
+// This function assumes the EXPLAIN token has already been consumed.
+func (p *Parser) parseExplainStatement() (*ExplainStatement, error) {
+	stmt := &ExplainStatement{}
+
+	if tok, _, _ := p.ScanIgnoreWhitespace(); tok == ANALYZE {
+		stmt.Analyze = true
+	} else {
+		p.Unscan()
 	}
 
-	// Check for required RETENTION token.
-	if tok != RETENTION {
-		err = newParseError(tokstr(tok, lit), []string{"RETENTION"}, pos)
-		return
+	if tok, pos, lit := p.ScanIgnoreWhitespace(); tok != SELECT {
+		return nil, newParseError(tokstr(tok, lit), []string{"SELECT"}, pos)
 	}
 
-	// Check of required POLICY token.
-	if tok, pos, lit = p.scanIgnoreWhitespace(); tok != POLICY {
-		err = newParseError(tokstr(tok, lit), []string{"POLICY"}, pos)
-		return
-	}
-
-	// Parse retention policy name.
-	name, err = p.parseIdent()
+	s, err := p.parseSelectStatement(targetNotRequired)
 	if err != nil {
-		return
+		return nil, err
 	}
-
-	return
+	stmt.Statement = s
+	return stmt, nil
 }
 
 // parseShowShardGroupsStatement parses a string for "SHOW SHARD GROUPS" statement.
@@ -1727,10 +1968,10 @@ func (p *Parser) parseShowStatsStatement() (*ShowStatsStatement, error) {
 	stmt := &ShowStatsStatement{}
 	var err error
 
-	if tok, _, _ := p.scanIgnoreWhitespace(); tok == FOR {
+	if tok, _, _ := p.ScanIgnoreWhitespace(); tok == FOR {
 		stmt.Module, err = p.parseString()
 	} else {
-		p.unscan()
+		p.Unscan()
 	}
 
 	return stmt, err
@@ -1741,10 +1982,10 @@ func (p *Parser) parseShowDiagnosticsStatement() (*ShowDiagnosticsStatement, err
 	stmt := &ShowDiagnosticsStatement{}
 	var err error
 
-	if tok, _, _ := p.scanIgnoreWhitespace(); tok == FOR {
+	if tok, _, _ := p.ScanIgnoreWhitespace(); tok == FOR {
 		stmt.Module, err = p.parseString()
 	} else {
-		p.unscan()
+		p.Unscan()
 	}
 
 	return stmt, err
@@ -1755,25 +1996,20 @@ func (p *Parser) parseShowDiagnosticsStatement() (*ShowDiagnosticsStatement, err
 func (p *Parser) parseDropContinuousQueryStatement() (*DropContinuousQueryStatement, error) {
 	stmt := &DropContinuousQueryStatement{}
 
-	// Expect a "QUERY" token.
-	if tok, pos, lit := p.scanIgnoreWhitespace(); tok != QUERY {
-		return nil, newParseError(tokstr(tok, lit), []string{"QUERY"}, pos)
-	}
-
 	// Read the id of the query to drop.
-	ident, err := p.parseIdent()
+	ident, err := p.ParseIdent()
 	if err != nil {
 		return nil, err
 	}
 	stmt.Name = ident
 
 	// Expect an "ON" keyword.
-	if tok, pos, lit := p.scanIgnoreWhitespace(); tok != ON {
+	if tok, pos, lit := p.ScanIgnoreWhitespace(); tok != ON {
 		return nil, newParseError(tokstr(tok, lit), []string{"ON"}, pos)
 	}
 
 	// Read the name of the database to remove the query from.
-	if ident, err = p.parseIdent(); err != nil {
+	if ident, err = p.ParseIdent(); err != nil {
 		return nil, err
 	}
 	stmt.Database = ident
@@ -1796,8 +2032,8 @@ func (p *Parser) parseFields() (Fields, error) {
 		fields = append(fields, f)
 
 		// If there's not a comma next then stop parsing fields.
-		if tok, _, _ := p.scan(); tok != COMMA {
-			p.unscan()
+		if tok, _, _ := p.Scan(); tok != COMMA {
+			p.Unscan()
 			break
 		}
 	}
@@ -1808,19 +2044,27 @@ func (p *Parser) parseFields() (Fields, error) {
 func (p *Parser) parseField() (*Field, error) {
 	f := &Field{}
 
-	_, pos, _ := p.scanIgnoreWhitespace()
-	p.unscan()
-	// Parse the expression first.
-	expr, err := p.ParseExpr()
+	// Attempt to parse a regex.
+	re, err := p.parseRegex()
 	if err != nil {
 		return nil, err
+	} else if re != nil {
+		f.Expr = re
+	} else {
+		_, pos, _ := p.ScanIgnoreWhitespace()
+		p.Unscan()
+		// Parse the expression first.
+		expr, err := p.ParseExpr()
+		if err != nil {
+			return nil, err
+		}
+		var c validateField
+		Walk(&c, expr)
+		if c.foundInvalid {
+			return nil, fmt.Errorf("invalid operator %s in SELECT clause at line %d, char %d; operator is intended for WHERE clause", c.badToken, pos.Line+1, pos.Char+1)
+		}
+		f.Expr = expr
 	}
-	var c validateField
-	Walk(&c, expr)
-	if c.foundInvalid {
-		return nil, fmt.Errorf("invalid operator %s in SELECT clause at line %d, char %d; operator is intended for WHERE clause", c.badToken, pos.Line+1, pos.Char+1)
-	}
-	f.Expr = expr
 
 	// Parse the alias if the current and next tokens are "WS AS".
 	alias, err := p.parseAlias()
@@ -1836,7 +2080,7 @@ func (p *Parser) parseField() (*Field, error) {
 }
 
 // validateField checks if the Expr is a valid field. We disallow all binary expression
-// that return a boolean
+// that return a boolean.
 type validateField struct {
 	foundInvalid bool
 	badToken     Token
@@ -1861,14 +2105,14 @@ func (c *validateField) Visit(n Node) Visitor {
 
 // parseAlias parses the "AS IDENT" alias for fields and dimensions.
 func (p *Parser) parseAlias() (string, error) {
-	// Check if the next token is "AS". If not, then unscan and exit.
-	if tok, _, _ := p.scanIgnoreWhitespace(); tok != AS {
-		p.unscan()
+	// Check if the next token is "AS". If not, then Unscan and exit.
+	if tok, _, _ := p.ScanIgnoreWhitespace(); tok != AS {
+		p.Unscan()
 		return "", nil
 	}
 
 	// Then we should have the alias identifier.
-	lit, err := p.parseIdent()
+	lit, err := p.ParseIdent()
 	if err != nil {
 		return "", err
 	}
@@ -1876,18 +2120,18 @@ func (p *Parser) parseAlias() (string, error) {
 }
 
 // parseSources parses a comma delimited list of sources.
-func (p *Parser) parseSources() (Sources, error) {
+func (p *Parser) parseSources(subqueries bool) (Sources, error) {
 	var sources Sources
 
 	for {
-		s, err := p.parseSource()
+		s, err := p.parseSource(subqueries)
 		if err != nil {
 			return nil, err
 		}
 		sources = append(sources, s)
 
-		if tok, _, _ := p.scanIgnoreWhitespace(); tok != COMMA {
-			p.unscan()
+		if tok, _, _ := p.ScanIgnoreWhitespace(); tok != COMMA {
+			p.Unscan()
 			break
 		}
 	}
@@ -1905,7 +2149,7 @@ func (p *Parser) peekRune() rune {
 	return r
 }
 
-func (p *Parser) parseSource() (Source, error) {
+func (p *Parser) parseSource(subqueries bool) (Source, error) {
 	m := &Measurement{}
 
 	// Attempt to parse a regex.
@@ -1916,6 +2160,28 @@ func (p *Parser) parseSource() (Source, error) {
 		m.Regex = re
 		// Regex is always last so we're done.
 		return m, nil
+	}
+
+	// If there is no regular expression, this might be a subquery.
+	// Parse the subquery if we are in a query that allows them as a source.
+	if m.Regex == nil && subqueries {
+		if tok, _, _ := p.ScanIgnoreWhitespace(); tok == LPAREN {
+			if err := p.parseTokens([]Token{SELECT}); err != nil {
+				return nil, err
+			}
+
+			stmt, err := p.parseSelectStatement(targetSubquery)
+			if err != nil {
+				return nil, err
+			}
+
+			if err := p.parseTokens([]Token{RPAREN}); err != nil {
+				return nil, err
+			}
+			return &SubQuery{Statement: stmt}, nil
+		} else {
+			p.Unscan()
+		}
 	}
 
 	// Didn't find a regex so parse segmented identifiers.
@@ -1959,8 +2225,8 @@ func (p *Parser) parseSource() (Source, error) {
 // parseCondition parses the "WHERE" clause of the query, if it exists.
 func (p *Parser) parseCondition() (Expr, error) {
 	// Check if the WHERE token exists.
-	if tok, _, _ := p.scanIgnoreWhitespace(); tok != WHERE {
-		p.unscan()
+	if tok, _, _ := p.ScanIgnoreWhitespace(); tok != WHERE {
+		p.Unscan()
 		return nil, nil
 	}
 
@@ -1976,13 +2242,13 @@ func (p *Parser) parseCondition() (Expr, error) {
 // parseDimensions parses the "GROUP BY" clause of the query, if it exists.
 func (p *Parser) parseDimensions() (Dimensions, error) {
 	// If the next token is not GROUP then exit.
-	if tok, _, _ := p.scanIgnoreWhitespace(); tok != GROUP {
-		p.unscan()
+	if tok, _, _ := p.ScanIgnoreWhitespace(); tok != GROUP {
+		p.Unscan()
 		return nil, nil
 	}
 
 	// Now the next token should be "BY".
-	if tok, pos, lit := p.scanIgnoreWhitespace(); tok != BY {
+	if tok, pos, lit := p.ScanIgnoreWhitespace(); tok != BY {
 		return nil, newParseError(tokstr(tok, lit), []string{"BY"}, pos)
 	}
 
@@ -1998,8 +2264,8 @@ func (p *Parser) parseDimensions() (Dimensions, error) {
 		dimensions = append(dimensions, d)
 
 		// If there's not a comma next then stop parsing dimensions.
-		if tok, _, _ := p.scan(); tok != COMMA {
-			p.unscan()
+		if tok, _, _ := p.Scan(); tok != COMMA {
+			p.Unscan()
 			break
 		}
 	}
@@ -2008,6 +2274,13 @@ func (p *Parser) parseDimensions() (Dimensions, error) {
 
 // parseDimension parses a single dimension.
 func (p *Parser) parseDimension() (*Dimension, error) {
+	re, err := p.parseRegex()
+	if err != nil {
+		return nil, err
+	} else if re != nil {
+		return &Dimension{Expr: re}, nil
+	}
+
 	// Parse the expression first.
 	expr, err := p.ParseExpr()
 	if err != nil {
@@ -2023,63 +2296,93 @@ func (p *Parser) parseDimension() (*Dimension, error) {
 // parseFill parses the fill call and its options.
 func (p *Parser) parseFill() (FillOption, interface{}, error) {
 	// Parse the expression first.
+	tok, _, lit := p.ScanIgnoreWhitespace()
+	p.Unscan()
+	if tok != IDENT || strings.ToLower(lit) != "fill" {
+		return NullFill, nil, nil
+	}
+
 	expr, err := p.ParseExpr()
 	if err != nil {
-		p.unscan()
-		return NullFill, nil, nil
+		return NullFill, nil, err
 	}
-	lit, ok := expr.(*Call)
+	fill, ok := expr.(*Call)
 	if !ok {
-		p.unscan()
-		return NullFill, nil, nil
+		return NullFill, nil, errors.New("fill must be a function call")
+	} else if len(fill.Args) != 1 {
+		return NullFill, nil, errors.New("fill requires an argument, e.g.: 0, null, none, previous, linear")
 	}
-	if strings.ToLower(lit.Name) != "fill" {
-		p.unscan()
-		return NullFill, nil, nil
-	}
-	if len(lit.Args) != 1 {
-		return NullFill, nil, errors.New("fill requires an argument, e.g.: 0, null, none, previous")
-	}
-	switch lit.Args[0].String() {
+	switch fill.Args[0].String() {
 	case "null":
 		return NullFill, nil, nil
 	case "none":
 		return NoFill, nil, nil
 	case "previous":
 		return PreviousFill, nil, nil
+	case "linear":
+		return LinearFill, nil, nil
 	default:
-		num, ok := lit.Args[0].(*NumberLiteral)
-		if !ok {
+		switch num := fill.Args[0].(type) {
+		case *IntegerLiteral:
+			return NumberFill, num.Val, nil
+		case *NumberLiteral:
+			return NumberFill, num.Val, nil
+		default:
 			return NullFill, nil, fmt.Errorf("expected number argument in fill()")
 		}
-		return NumberFill, num.Val, nil
 	}
 }
 
-// parseOptionalTokenAndInt parses the specified token followed
+// parseLocation parses the timezone call and its arguments.
+func (p *Parser) parseLocation() (*time.Location, error) {
+	// Parse the expression first.
+	tok, _, lit := p.ScanIgnoreWhitespace()
+	p.Unscan()
+	if tok != IDENT || strings.ToLower(lit) != "tz" {
+		return nil, nil
+	}
+
+	expr, err := p.ParseExpr()
+	if err != nil {
+		return nil, err
+	}
+	tz, ok := expr.(*Call)
+	if !ok {
+		return nil, errors.New("tz must be a function call")
+	} else if len(tz.Args) != 1 {
+		return nil, errors.New("tz requires exactly one argument")
+	}
+
+	tzname, ok := tz.Args[0].(*StringLiteral)
+	if !ok {
+		return nil, errors.New("expected string argument in tz()")
+	}
+
+	loc, err := time.LoadLocation(tzname.Val)
+	if err != nil {
+		// Do not pass the same error message as the error may contain sensitive pathnames.
+		return nil, fmt.Errorf("unable to find time zone %s", tzname.Val)
+	}
+	return loc, nil
+}
+
+// ParseOptionalTokenAndInt parses the specified token followed
 // by an int, if it exists.
-func (p *Parser) parseOptionalTokenAndInt(t Token) (int, error) {
+func (p *Parser) ParseOptionalTokenAndInt(t Token) (int, error) {
 	// Check if the token exists.
-	if tok, _, _ := p.scanIgnoreWhitespace(); tok != t {
-		p.unscan()
+	if tok, _, _ := p.ScanIgnoreWhitespace(); tok != t {
+		p.Unscan()
 		return 0, nil
 	}
 
 	// Scan the number.
-	tok, pos, lit := p.scanIgnoreWhitespace()
-	if tok != NUMBER {
-		return 0, newParseError(tokstr(tok, lit), []string{"number"}, pos)
-	}
-
-	// Return an error if the number has a fractional part.
-	if strings.Contains(lit, ".") {
-		msg := fmt.Sprintf("fractional parts not allowed in %s", t.String())
-		return 0, &ParseError{Message: msg, Pos: pos}
+	tok, pos, lit := p.ScanIgnoreWhitespace()
+	if tok != INTEGER {
+		return 0, newParseError(tokstr(tok, lit), []string{"integer"}, pos)
 	}
 
 	// Parse number.
 	n, _ := strconv.ParseInt(lit, 10, 64)
-
 	if n < 0 {
 		msg := fmt.Sprintf("%s must be >= 0", t.String())
 		return 0, &ParseError{Message: msg, Pos: pos}
@@ -2091,13 +2394,13 @@ func (p *Parser) parseOptionalTokenAndInt(t Token) (int, error) {
 // parseOrderBy parses the "ORDER BY" clause of a query, if it exists.
 func (p *Parser) parseOrderBy() (SortFields, error) {
 	// Return nil result and nil error if no ORDER token at this position.
-	if tok, _, _ := p.scanIgnoreWhitespace(); tok != ORDER {
-		p.unscan()
+	if tok, _, _ := p.ScanIgnoreWhitespace(); tok != ORDER {
+		p.Unscan()
 		return nil, nil
 	}
 
 	// Parse the required BY token.
-	if tok, pos, lit := p.scanIgnoreWhitespace(); tok != BY {
+	if tok, pos, lit := p.ScanIgnoreWhitespace(); tok != BY {
 		return nil, newParseError(tokstr(tok, lit), []string{"BY"}, pos)
 	}
 
@@ -2114,7 +2417,7 @@ func (p *Parser) parseOrderBy() (SortFields, error) {
 func (p *Parser) parseSortFields() (SortFields, error) {
 	var fields SortFields
 
-	tok, pos, lit := p.scanIgnoreWhitespace()
+	tok, pos, lit := p.ScanIgnoreWhitespace()
 
 	switch tok {
 	// The first field after an order by may not have a field name (e.g. ORDER BY ASC)
@@ -2122,7 +2425,7 @@ func (p *Parser) parseSortFields() (SortFields, error) {
 		fields = append(fields, &SortField{Ascending: (tok == ASC)})
 	// If it's a token, parse it as a sort field.  At least one is required.
 	case IDENT:
-		p.unscan()
+		p.Unscan()
 		field, err := p.parseSortField()
 		if err != nil {
 			return nil, err
@@ -2140,10 +2443,10 @@ func (p *Parser) parseSortFields() (SortFields, error) {
 
 	// Parse additional fields.
 	for {
-		tok, _, _ := p.scanIgnoreWhitespace()
+		tok, _, _ := p.ScanIgnoreWhitespace()
 
 		if tok != COMMA {
-			p.unscan()
+			p.Unscan()
 			break
 		}
 
@@ -2167,16 +2470,16 @@ func (p *Parser) parseSortField() (*SortField, error) {
 	field := &SortField{}
 
 	// Parse sort field name.
-	ident, err := p.parseIdent()
+	ident, err := p.ParseIdent()
 	if err != nil {
 		return nil, err
 	}
 	field.Name = ident
 
 	// Check for optional ASC or DESC clause. Default is ASC.
-	tok, _, _ := p.scanIgnoreWhitespace()
+	tok, _, _ := p.ScanIgnoreWhitespace()
 	if tok != ASC && tok != DESC {
-		p.unscan()
+		p.Unscan()
 		tok = ASC
 	}
 	field.Ascending = (tok == ASC)
@@ -2184,15 +2487,45 @@ func (p *Parser) parseSortField() (*SortField, error) {
 	return field, nil
 }
 
-// parseVarRef parses a reference to a measurement or field.
-func (p *Parser) parseVarRef() (*VarRef, error) {
+// ParseVarRef parses a reference to a measurement or field.
+func (p *Parser) ParseVarRef() (*VarRef, error) {
 	// Parse the segments of the variable ref.
 	segments, err := p.parseSegmentedIdents()
 	if err != nil {
 		return nil, err
 	}
 
-	vr := &VarRef{Val: strings.Join(segments, ".")}
+	var dtype DataType
+	if tok, _, _ := p.Scan(); tok == DOUBLECOLON {
+		tok, pos, lit := p.Scan()
+		switch tok {
+		case IDENT:
+			switch strings.ToLower(lit) {
+			case "float":
+				dtype = Float
+			case "integer":
+				dtype = Integer
+			case "unsigned":
+				dtype = Unsigned
+			case "string":
+				dtype = String
+			case "boolean":
+				dtype = Boolean
+			default:
+				return nil, newParseError(tokstr(tok, lit), []string{"float", "integer", "unsigned", "string", "boolean", "field", "tag"}, pos)
+			}
+		case FIELD:
+			dtype = AnyField
+		case TAG:
+			dtype = Tag
+		default:
+			return nil, newParseError(tokstr(tok, lit), []string{"float", "integer", "string", "boolean", "field", "tag"}, pos)
+		}
+	} else {
+		p.Unscan()
+	}
+
+	vr := &VarRef{Val: strings.Join(segments, "."), Type: dtype}
 
 	return vr, nil
 }
@@ -2213,9 +2546,9 @@ func (p *Parser) ParseExpr() (Expr, error) {
 	// Loop over operations and unary exprs and build a tree based on precendence.
 	for {
 		// If the next token is NOT an operator then return the expression.
-		op, _, _ := p.scanIgnoreWhitespace()
+		op, _, _ := p.ScanIgnoreWhitespace()
 		if !op.isOperator() {
-			p.unscan()
+			p.Unscan()
 			return root.RHS, nil
 		}
 
@@ -2223,13 +2556,12 @@ func (p *Parser) ParseExpr() (Expr, error) {
 		var rhs Expr
 		if IsRegexOp(op) {
 			// RHS of a regex operator must be a regular expression.
-			p.consumeWhitespace()
 			if rhs, err = p.parseRegex(); err != nil {
 				return nil, err
 			}
 			// parseRegex can return an empty type, but we need it to be present
 			if rhs.(*RegexLiteral) == nil {
-				tok, pos, lit := p.scanIgnoreWhitespace()
+				tok, pos, lit := p.ScanIgnoreWhitespace()
 				return nil, newParseError(tokstr(tok, lit), []string{"regex"}, pos)
 			}
 		} else {
@@ -2257,44 +2589,44 @@ func (p *Parser) ParseExpr() (Expr, error) {
 // parseUnaryExpr parses an non-binary expression.
 func (p *Parser) parseUnaryExpr() (Expr, error) {
 	// If the first token is a LPAREN then parse it as its own grouped expression.
-	if tok, _, _ := p.scanIgnoreWhitespace(); tok == LPAREN {
+	if tok, _, _ := p.ScanIgnoreWhitespace(); tok == LPAREN {
 		expr, err := p.ParseExpr()
 		if err != nil {
 			return nil, err
 		}
 
 		// Expect an RPAREN at the end.
-		if tok, pos, lit := p.scanIgnoreWhitespace(); tok != RPAREN {
+		if tok, pos, lit := p.ScanIgnoreWhitespace(); tok != RPAREN {
 			return nil, newParseError(tokstr(tok, lit), []string{")"}, pos)
 		}
 
 		return &ParenExpr{Expr: expr}, nil
 	}
-	p.unscan()
+	p.Unscan()
 
 	// Read next token.
-	tok, pos, lit := p.scanIgnoreWhitespace()
+	tok, pos, lit := p.ScanIgnoreWhitespace()
 	switch tok {
 	case IDENT:
 		// If the next immediate token is a left parentheses, parse as function call.
 		// Otherwise parse as a variable reference.
-		if tok0, _, _ := p.scan(); tok0 == LPAREN {
+		if tok0, _, _ := p.Scan(); tok0 == LPAREN {
 			return p.parseCall(lit)
 		}
 
-		p.unscan() // unscan the last token (wasn't an LPAREN)
-		p.unscan() // unscan the IDENT token
+		p.Unscan() // Unscan the last token (wasn't an LPAREN)
+		p.Unscan() // Unscan the IDENT token
 
 		// Parse it as a VarRef.
-		return p.parseVarRef()
+		return p.ParseVarRef()
 	case DISTINCT:
 		// If the next immediate token is a left parentheses, parse as function call.
 		// Otherwise parse as a Distinct expression.
-		tok0, pos, lit := p.scan()
+		tok0, pos, lit := p.Scan()
 		if tok0 == LPAREN {
 			return p.parseCall("distinct")
 		} else if tok0 == WS {
-			tok1, pos, lit := p.scanIgnoreWhitespace()
+			tok1, pos, lit := p.ScanIgnoreWhitespace()
 			if tok1 != IDENT {
 				return nil, newParseError(tokstr(tok1, lit), []string{"identifier"}, pos)
 			}
@@ -2303,25 +2635,6 @@ func (p *Parser) parseUnaryExpr() (Expr, error) {
 
 		return nil, newParseError(tokstr(tok0, lit), []string{"(", "identifier"}, pos)
 	case STRING:
-		// If literal looks like a date time then parse it as a time literal.
-		if isDateTimeString(lit) {
-			t, err := time.Parse(DateTimeFormat, lit)
-			if err != nil {
-				// try to parse it as an RFCNano time
-				t, err := time.Parse(time.RFC3339Nano, lit)
-				if err != nil {
-					return nil, &ParseError{Message: "unable to parse datetime", Pos: pos}
-				}
-				return &TimeLiteral{Val: t}, nil
-			}
-			return &TimeLiteral{Val: t}, nil
-		} else if isDateString(lit) {
-			t, err := time.Parse(DateFormat, lit)
-			if err != nil {
-				return nil, &ParseError{Message: "unable to parse date", Pos: pos}
-			}
-			return &TimeLiteral{Val: t}, nil
-		}
 		return &StringLiteral{Val: lit}, nil
 	case NUMBER:
 		v, err := strconv.ParseFloat(lit, 64)
@@ -2329,19 +2642,116 @@ func (p *Parser) parseUnaryExpr() (Expr, error) {
 			return nil, &ParseError{Message: "unable to parse number", Pos: pos}
 		}
 		return &NumberLiteral{Val: v}, nil
+	case INTEGER:
+		v, err := strconv.ParseInt(lit, 10, 64)
+		if err != nil {
+			// The literal may be too large to fit into an int64. If it is, use an unsigned integer.
+			// The check for negative numbers is handled somewhere else so this should always be a positive number.
+			if v, err := strconv.ParseUint(lit, 10, 64); err == nil {
+				return &UnsignedLiteral{Val: v}, nil
+			}
+			return nil, &ParseError{Message: "unable to parse integer", Pos: pos}
+		}
+		return &IntegerLiteral{Val: v}, nil
 	case TRUE, FALSE:
 		return &BooleanLiteral{Val: (tok == TRUE)}, nil
 	case DURATIONVAL:
-		v, _ := ParseDuration(lit)
+		v, err := ParseDuration(lit)
+		if err != nil {
+			return nil, err
+		}
 		return &DurationLiteral{Val: v}, nil
 	case MUL:
-		return &Wildcard{}, nil
+		wc := &Wildcard{}
+		if tok, _, _ := p.Scan(); tok == DOUBLECOLON {
+			tok, pos, lit := p.Scan()
+			switch tok {
+			case FIELD, TAG:
+				wc.Type = tok
+			default:
+				return nil, newParseError(tokstr(tok, lit), []string{"field", "tag"}, pos)
+			}
+		} else {
+			p.Unscan()
+		}
+		return wc, nil
 	case REGEX:
 		re, err := regexp.Compile(lit)
 		if err != nil {
 			return nil, &ParseError{Message: err.Error(), Pos: pos}
 		}
 		return &RegexLiteral{Val: re}, nil
+	case BOUNDPARAM:
+		k := strings.TrimPrefix(lit, "$")
+		if len(k) == 0 {
+			return nil, errors.New("empty bound parameter")
+		}
+
+		v := p.params[k]
+		if v == nil {
+			return nil, fmt.Errorf("missing parameter: %s", k)
+		}
+
+		switch v := v.(type) {
+		case float64:
+			return &NumberLiteral{Val: v}, nil
+		case int64:
+			return &IntegerLiteral{Val: v}, nil
+		case string:
+			return &StringLiteral{Val: v}, nil
+		case bool:
+			return &BooleanLiteral{Val: v}, nil
+		default:
+			return nil, fmt.Errorf("unable to bind parameter with type %T", v)
+		}
+	case ADD, SUB:
+		mul := 1
+		if tok == SUB {
+			mul = -1
+		}
+
+		tok0, pos0, lit0 := p.ScanIgnoreWhitespace()
+		switch tok0 {
+		case NUMBER, INTEGER, DURATIONVAL, LPAREN, IDENT:
+			// Unscan the token and use parseUnaryExpr.
+			p.Unscan()
+
+			lit, err := p.parseUnaryExpr()
+			if err != nil {
+				return nil, err
+			}
+
+			switch lit := lit.(type) {
+			case *NumberLiteral:
+				lit.Val *= float64(mul)
+			case *IntegerLiteral:
+				lit.Val *= int64(mul)
+			case *UnsignedLiteral:
+				if tok == SUB {
+					// Because of twos-complement integers and the method we parse, math.MinInt64 will be parsed
+					// as an UnsignedLiteral because it overflows an int64, but it fits into int64 if it were parsed
+					// as a negative number instead.
+					if lit.Val == uint64(math.MaxInt64+1) {
+						return &IntegerLiteral{Val: int64(-lit.Val)}, nil
+					}
+					return nil, fmt.Errorf("constant -%d underflows int64", lit.Val)
+				}
+			case *DurationLiteral:
+				lit.Val *= time.Duration(mul)
+			case *VarRef, *Call, *ParenExpr:
+				// Multiply the variable.
+				return &BinaryExpr{
+					Op:  MUL,
+					LHS: &IntegerLiteral{Val: int64(mul)},
+					RHS: lit,
+				}, nil
+			default:
+				panic(fmt.Sprintf("unexpected literal: %T", lit))
+			}
+			return lit, nil
+		default:
+			return nil, newParseError(tokstr(tok0, lit0), []string{"identifier", "number", "duration", "("}, pos0)
+		}
 	default:
 		return nil, newParseError(tokstr(tok, lit), []string{"identifier", "string", "number", "bool"}, pos)
 	}
@@ -2384,31 +2794,54 @@ func (p *Parser) parseRegex() (*RegexLiteral, error) {
 // This function assumes the function name and LPAREN have been consumed.
 func (p *Parser) parseCall(name string) (*Call, error) {
 	name = strings.ToLower(name)
-	// If there's a right paren then just return immediately.
-	if tok, _, _ := p.scan(); tok == RPAREN {
-		return &Call{Name: name}, nil
-	}
-	p.unscan()
 
-	// Otherwise parse function call arguments.
+	// Parse first function argument if one exists.
 	var args []Expr
+	re, err := p.parseRegex()
+	if err != nil {
+		return nil, err
+	} else if re != nil {
+		args = append(args, re)
+	} else {
+		// If there's a right paren then just return immediately.
+		if tok, _, _ := p.Scan(); tok == RPAREN {
+			return &Call{Name: name}, nil
+		}
+		p.Unscan()
+
+		arg, err := p.ParseExpr()
+		if err != nil {
+			return nil, err
+		}
+		args = append(args, arg)
+	}
+
+	// Parse additional function arguments if there is a comma.
 	for {
+		// If there's not a comma, stop parsing arguments.
+		if tok, _, _ := p.ScanIgnoreWhitespace(); tok != COMMA {
+			p.Unscan()
+			break
+		}
+
+		re, err := p.parseRegex()
+		if err != nil {
+			return nil, err
+		} else if re != nil {
+			args = append(args, re)
+			continue
+		}
+
 		// Parse an expression argument.
 		arg, err := p.ParseExpr()
 		if err != nil {
 			return nil, err
 		}
 		args = append(args, arg)
-
-		// If there's not a comma next then stop parsing arguments.
-		if tok, _, _ := p.scan(); tok != COMMA {
-			p.unscan()
-			break
-		}
 	}
 
 	// There should be a right parentheses at the end.
-	if tok, pos, lit := p.scan(); tok != RPAREN {
+	if tok, pos, lit := p.Scan(); tok != RPAREN {
 		return nil, newParseError(tokstr(tok, lit), []string{")"}, pos)
 	}
 
@@ -2420,8 +2853,8 @@ func (p *Parser) parseCall(name string) (*Call, error) {
 // EVERY and FOR are optional, but at least one of the two has to be used.
 func (p *Parser) parseResample() (time.Duration, time.Duration, error) {
 	var interval time.Duration
-	if p.parseTokenMaybe(EVERY) {
-		tok, pos, lit := p.scanIgnoreWhitespace()
+	if tok, _, _ := p.ScanIgnoreWhitespace(); tok == EVERY {
+		tok, pos, lit := p.ScanIgnoreWhitespace()
 		if tok != DURATIONVAL {
 			return 0, 0, newParseError(tokstr(tok, lit), []string{"duration"}, pos)
 		}
@@ -2431,11 +2864,13 @@ func (p *Parser) parseResample() (time.Duration, time.Duration, error) {
 			return 0, 0, &ParseError{Message: err.Error(), Pos: pos}
 		}
 		interval = d
+	} else {
+		p.Unscan()
 	}
 
 	var maxDuration time.Duration
-	if p.parseTokenMaybe(FOR) {
-		tok, pos, lit := p.scanIgnoreWhitespace()
+	if tok, _, _ := p.ScanIgnoreWhitespace(); tok == FOR {
+		tok, pos, lit := p.ScanIgnoreWhitespace()
 		if tok != DURATIONVAL {
 			return 0, 0, newParseError(tokstr(tok, lit), []string{"duration"}, pos)
 		}
@@ -2445,40 +2880,47 @@ func (p *Parser) parseResample() (time.Duration, time.Duration, error) {
 			return 0, 0, &ParseError{Message: err.Error(), Pos: pos}
 		}
 		maxDuration = d
+	} else {
+		p.Unscan()
 	}
 
 	// Neither EVERY or FOR were read, so read the next token again
 	// so we can return a suitable error message.
 	if interval == 0 && maxDuration == 0 {
-		tok, pos, lit := p.scanIgnoreWhitespace()
+		tok, pos, lit := p.ScanIgnoreWhitespace()
 		return 0, 0, newParseError(tokstr(tok, lit), []string{"EVERY", "FOR"}, pos)
 	}
 	return interval, maxDuration, nil
 }
 
 // scan returns the next token from the underlying scanner.
-func (p *Parser) scan() (tok Token, pos Pos, lit string) { return p.s.Scan() }
+func (p *Parser) Scan() (tok Token, pos Pos, lit string) { return p.s.Scan() }
 
-// scanIgnoreWhitespace scans the next non-whitespace token.
-func (p *Parser) scanIgnoreWhitespace() (tok Token, pos Pos, lit string) {
-	tok, pos, lit = p.scan()
-	if tok == WS {
-		tok, pos, lit = p.scan()
+// ScanIgnoreWhitespace scans the next non-whitespace and non-comment token.
+func (p *Parser) ScanIgnoreWhitespace() (tok Token, pos Pos, lit string) {
+	for {
+		tok, pos, lit = p.Scan()
+		if tok == WS || tok == COMMENT {
+			continue
+		}
+		return
 	}
-	return
 }
 
 // consumeWhitespace scans the next token if it's whitespace.
 func (p *Parser) consumeWhitespace() {
-	if tok, _, _ := p.scan(); tok != WS {
-		p.unscan()
+	if tok, _, _ := p.Scan(); tok != WS {
+		p.Unscan()
 	}
 }
 
-// unscan pushes the previously read token back onto the buffer.
-func (p *Parser) unscan() { p.s.Unscan() }
+// Unscan pushes the previously read token back onto the buffer.
+func (p *Parser) Unscan() { p.s.Unscan() }
 
 // ParseDuration parses a time duration from a string.
+// This is needed instead of time.ParseDuration because this will support
+// the full syntax that InfluxQL supports for specifying durations
+// including weeks and days.
 func ParseDuration(s string) (time.Duration, error) {
 	// Return an error if the string is blank or one character
 	if len(s) < 2 {
@@ -2486,43 +2928,88 @@ func ParseDuration(s string) (time.Duration, error) {
 	}
 
 	// Split string into individual runes.
-	a := split(s)
+	a := []rune(s)
 
-	// Extract the unit of measure.
-	// If the last two characters are "ms" then parse as milliseconds.
-	// Otherwise just use the last character as the unit of measure.
-	var num, uom string
-	if len(s) > 2 && s[len(s)-2:] == "ms" {
-		num, uom = string(a[:len(a)-2]), "ms"
-	} else {
-		num, uom = string(a[:len(a)-1]), string(a[len(a)-1:])
+	// Start with a zero duration.
+	var d time.Duration
+	i := 0
+
+	// Check for a negative.
+	isNegative := false
+	if a[i] == '-' {
+		isNegative = true
+		i++
 	}
 
-	// Parse the numeric part.
-	n, err := strconv.ParseInt(num, 10, 64)
-	if err != nil {
-		return 0, ErrInvalidDuration
+	var measure int64
+	var unit string
+
+	// Parsing loop.
+	for i < len(a) {
+		// Find the number portion.
+		start := i
+		for ; i < len(a) && isDigit(a[i]); i++ {
+			// Scan for the digits.
+		}
+
+		// Check if we reached the end of the string prematurely.
+		if i >= len(a) || i == start {
+			return 0, ErrInvalidDuration
+		}
+
+		// Parse the numeric part.
+		n, err := strconv.ParseInt(string(a[start:i]), 10, 64)
+		if err != nil {
+			return 0, ErrInvalidDuration
+		}
+		measure = n
+
+		// Extract the unit of measure.
+		// If the last two characters are "ms" then parse as milliseconds.
+		// Otherwise just use the last character as the unit of measure.
+		unit = string(a[i])
+		switch a[i] {
+		case 'n':
+			if i+1 < len(a) && a[i+1] == 's' {
+				unit = string(a[i : i+2])
+				d += time.Duration(n)
+				i += 2
+				continue
+			}
+			return 0, ErrInvalidDuration
+		case 'u', 'µ':
+			d += time.Duration(n) * time.Microsecond
+		case 'm':
+			if i+1 < len(a) && a[i+1] == 's' {
+				unit = string(a[i : i+2])
+				d += time.Duration(n) * time.Millisecond
+				i += 2
+				continue
+			}
+			d += time.Duration(n) * time.Minute
+		case 's':
+			d += time.Duration(n) * time.Second
+		case 'h':
+			d += time.Duration(n) * time.Hour
+		case 'd':
+			d += time.Duration(n) * 24 * time.Hour
+		case 'w':
+			d += time.Duration(n) * 7 * 24 * time.Hour
+		default:
+			return 0, ErrInvalidDuration
+		}
+		i++
 	}
 
-	// Multiply by the unit of measure.
-	switch uom {
-	case "u", "µ":
-		return time.Duration(n) * time.Microsecond, nil
-	case "ms":
-		return time.Duration(n) * time.Millisecond, nil
-	case "s":
-		return time.Duration(n) * time.Second, nil
-	case "m":
-		return time.Duration(n) * time.Minute, nil
-	case "h":
-		return time.Duration(n) * time.Hour, nil
-	case "d":
-		return time.Duration(n) * 24 * time.Hour, nil
-	case "w":
-		return time.Duration(n) * 7 * 24 * time.Hour, nil
-	default:
-		return 0, ErrInvalidDuration
+	// Check to see if we overflowed a duration
+	if d < 0 && !isNegative {
+		return 0, fmt.Errorf("overflowed duration %d%s: choose a smaller duration or INF", measure, unit)
 	}
+
+	if isNegative {
+		d = -d
+	}
+	return d, nil
 }
 
 // FormatDuration formats a duration to a string.
@@ -2551,43 +3038,39 @@ func FormatDuration(d time.Duration) string {
 // parseTokens consumes an expected sequence of tokens.
 func (p *Parser) parseTokens(toks []Token) error {
 	for _, expected := range toks {
-		if tok, pos, lit := p.scanIgnoreWhitespace(); tok != expected {
+		if tok, pos, lit := p.ScanIgnoreWhitespace(); tok != expected {
 			return newParseError(tokstr(tok, lit), []string{tokens[expected]}, pos)
 		}
 	}
 	return nil
 }
 
-// parseTokenMaybe consumes the next token if it matches the expected one and
-// does nothing if the next token is not the next one.
-func (p *Parser) parseTokenMaybe(expected Token) bool {
-	tok, _, _ := p.scanIgnoreWhitespace()
-	if tok != expected {
-		p.unscan()
-		return false
-	}
-	return true
-}
+var (
+	// Quote String replacer.
+	qsReplacer = strings.NewReplacer("\n", `\n`, `\`, `\\`, `'`, `\'`)
+
+	// Quote Ident replacer.
+	qiReplacer = strings.NewReplacer("\n", `\n`, `\`, `\\`, `"`, `\"`)
+)
 
 // QuoteString returns a quoted string.
 func QuoteString(s string) string {
-	return `'` + strings.NewReplacer("\n", `\n`, `\`, `\\`, `'`, `\'`).Replace(s) + `'`
+	return `'` + qsReplacer.Replace(s) + `'`
 }
 
 // QuoteIdent returns a quoted identifier from multiple bare identifiers.
 func QuoteIdent(segments ...string) string {
-	r := strings.NewReplacer("\n", `\n`, `\`, `\\`, `"`, `\"`)
-
 	var buf bytes.Buffer
 	for i, segment := range segments {
 		needQuote := IdentNeedsQuotes(segment) ||
-			((i < len(segments)-1) && segment != "") // not last segment && not ""
+			((i < len(segments)-1) && segment != "") || // not last segment && not ""
+			((i == 0 || i == len(segments)-1) && segment == "") // the first or last segment and an empty string
 
 		if needQuote {
 			_ = buf.WriteByte('"')
 		}
 
-		_, _ = buf.WriteString(r.Replace(segment))
+		_, _ = buf.WriteString(qiReplacer.Replace(segment))
 
 		if needQuote {
 			_ = buf.WriteByte('"')
@@ -2617,14 +3100,6 @@ func IdentNeedsQuotes(ident string) bool {
 	return false
 }
 
-// split splits a string into a slice of runes.
-func split(s string) (a []rune) {
-	for _, ch := range s {
-		a = append(a, ch)
-	}
-	return
-}
-
 // isDateString returns true if the string looks like a date-only time literal.
 func isDateString(s string) bool { return dateStringRegexp.MatchString(s) }
 
@@ -2634,7 +3109,7 @@ func isDateTimeString(s string) bool { return dateTimeStringRegexp.MatchString(s
 var dateStringRegexp = regexp.MustCompile(`^\d{4}-\d{2}-\d{2}$`)
 var dateTimeStringRegexp = regexp.MustCompile(`^\d{4}-\d{2}-\d{2}.+`)
 
-// ErrInvalidDuration is returned when parsing a malformatted duration.
+// ErrInvalidDuration is returned when parsing a malformed duration.
 var ErrInvalidDuration = errors.New("invalid duration")
 
 // ParseError represents an error that occurred during parsing.

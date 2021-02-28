@@ -1,120 +1,120 @@
+// The freets_inspect command displays detailed information about FreeTSDB data files.
 package main
 
 import (
-	"flag"
 	"fmt"
+	"io"
+	"log"
 	"os"
 
+	"github.com/freetsdb/freetsdb/cmd"
+	"github.com/freetsdb/freetsdb/cmd/freets_inspect/buildtsi"
+	"github.com/freetsdb/freetsdb/cmd/freets_inspect/deletetsm"
+	"github.com/freetsdb/freetsdb/cmd/freets_inspect/dumptsi"
+	"github.com/freetsdb/freetsdb/cmd/freets_inspect/dumptsm"
+	"github.com/freetsdb/freetsdb/cmd/freets_inspect/dumptsmwal"
+	"github.com/freetsdb/freetsdb/cmd/freets_inspect/export"
+	"github.com/freetsdb/freetsdb/cmd/freets_inspect/help"
+	"github.com/freetsdb/freetsdb/cmd/freets_inspect/report"
+	"github.com/freetsdb/freetsdb/cmd/freets_inspect/reporttsi"
+	"github.com/freetsdb/freetsdb/cmd/freets_inspect/verify/seriesfile"
+	"github.com/freetsdb/freetsdb/cmd/freets_inspect/verify/tsm"
 	_ "github.com/freetsdb/freetsdb/tsdb/engine"
 )
 
-func usage() {
-	println(`Usage: freets_inspect <command> [options]
-
-Displays detailed information about FreeTSDB data files.
-`)
-
-	println(`Commands:
-  info - displays series meta-data for all shards.  Default location [$HOME/.freetsdb]
-  dumptsm - dumps low-level details about tsm1 files.
-  dumptsmdev - dumps low-level details about tsm1dev files.`)
-	println()
-}
-
 func main() {
-
-	flag.Usage = usage
-	flag.Parse()
-
-	if len(flag.Args()) == 0 {
-		flag.Usage()
-		os.Exit(0)
-	}
-
-	switch flag.Args()[0] {
-	case "info":
-		var path string
-		fs := flag.NewFlagSet("info", flag.ExitOnError)
-		fs.StringVar(&path, "dir", os.Getenv("HOME")+"/.freetsdb", "Root storage path. [$HOME/.freetsdb]")
-
-		fs.Usage = func() {
-			println("Usage: freets_inspect info [options]\n\n   Displays series meta-data for all shards..")
-			println()
-			println("Options:")
-			fs.PrintDefaults()
-		}
-
-		if err := fs.Parse(flag.Args()[1:]); err != nil {
-			fmt.Printf("%v", err)
-			os.Exit(1)
-		}
-		cmdInfo(path)
-	case "dumptsm":
-		var dumpAll bool
-		opts := &tsdmDumpOpts{}
-		fs := flag.NewFlagSet("file", flag.ExitOnError)
-		fs.BoolVar(&opts.dumpIndex, "index", false, "Dump raw index data")
-		fs.BoolVar(&opts.dumpBlocks, "blocks", false, "Dump raw block data")
-		fs.BoolVar(&dumpAll, "all", false, "Dump all data. Caution: This may print a lot of information")
-		fs.StringVar(&opts.filterKey, "filter-key", "", "Only display index and block data match this key substring")
-
-		fs.Usage = func() {
-			println("Usage: freets_inspect dumptsm [options] <path>\n\n  Dumps low-level details about tsm1 files.")
-			println()
-			println("Options:")
-			fs.PrintDefaults()
-			os.Exit(0)
-		}
-
-		if err := fs.Parse(flag.Args()[1:]); err != nil {
-			fmt.Printf("%v", err)
-			os.Exit(1)
-		}
-
-		if len(fs.Args()) == 0 || fs.Args()[0] == "" {
-			fmt.Printf("TSM file not specified\n\n")
-			fs.Usage()
-			fs.PrintDefaults()
-			os.Exit(1)
-		}
-		opts.path = fs.Args()[0]
-		opts.dumpBlocks = opts.dumpBlocks || dumpAll || opts.filterKey != ""
-		opts.dumpIndex = opts.dumpIndex || dumpAll || opts.filterKey != ""
-		cmdDumpTsm1(opts)
-	case "dumptsmdev":
-		var dumpAll bool
-		opts := &tsdmDumpOpts{}
-		fs := flag.NewFlagSet("file", flag.ExitOnError)
-		fs.BoolVar(&opts.dumpIndex, "index", false, "Dump raw index data")
-		fs.BoolVar(&opts.dumpBlocks, "blocks", false, "Dump raw block data")
-		fs.BoolVar(&dumpAll, "all", false, "Dump all data. Caution: This may print a lot of information")
-		fs.StringVar(&opts.filterKey, "filter-key", "", "Only display index and block data match this key substring")
-
-		fs.Usage = func() {
-			println("Usage: freets_inspect dumptsm [options] <path>\n\n  Dumps low-level details about tsm1 files.")
-			println()
-			println("Options:")
-			fs.PrintDefaults()
-			os.Exit(0)
-		}
-
-		if err := fs.Parse(flag.Args()[1:]); err != nil {
-			fmt.Printf("%v", err)
-			os.Exit(1)
-		}
-
-		if len(fs.Args()) == 0 || fs.Args()[0] == "" {
-			fmt.Printf("TSM file not specified\n\n")
-			fs.Usage()
-			fs.PrintDefaults()
-			os.Exit(1)
-		}
-		opts.path = fs.Args()[0]
-		opts.dumpBlocks = opts.dumpBlocks || dumpAll || opts.filterKey != ""
-		opts.dumpIndex = opts.dumpIndex || dumpAll || opts.filterKey != ""
-		cmdDumpTsm1dev(opts)
-	default:
-		flag.Usage()
+	m := NewMain()
+	if err := m.Run(os.Args[1:]...); err != nil {
+		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
+}
+
+// Main represents the program execution.
+type Main struct {
+	Logger *log.Logger
+
+	Stdin  io.Reader
+	Stdout io.Writer
+	Stderr io.Writer
+}
+
+// NewMain returns a new instance of Main.
+func NewMain() *Main {
+	return &Main{
+		Logger: log.New(os.Stderr, "[freets_inspect] ", log.LstdFlags),
+		Stdin:  os.Stdin,
+		Stdout: os.Stdout,
+		Stderr: os.Stderr,
+	}
+}
+
+// Run determines and runs the command specified by the CLI args.
+func (m *Main) Run(args ...string) error {
+	name, args := cmd.ParseCommandName(args)
+
+	// Extract name from args.
+	switch name {
+	case "", "help":
+		if err := help.NewCommand().Run(args...); err != nil {
+			return fmt.Errorf("help: %s", err)
+		}
+	case "deletetsm":
+		name := deletetsm.NewCommand()
+		if err := name.Run(args...); err != nil {
+			return fmt.Errorf("deletetsm: %s", err)
+		}
+	case "dumptsi":
+		name := dumptsi.NewCommand()
+		if err := name.Run(args...); err != nil {
+			return fmt.Errorf("dumptsi: %s", err)
+		}
+	case "dumptsmdev":
+		fmt.Fprintf(m.Stderr, "warning: dumptsmdev is deprecated, use dumptsm instead.\n")
+		fallthrough
+	case "dumptsm":
+		name := dumptsm.NewCommand()
+		if err := name.Run(args...); err != nil {
+			return fmt.Errorf("dumptsm: %s", err)
+		}
+	case "dumptsmwal":
+		name := dumptsmwal.NewCommand()
+		if err := name.Run(args...); err != nil {
+			return fmt.Errorf("dumptsmwal: %s", err)
+		}
+	case "export":
+		name := export.NewCommand()
+		if err := name.Run(args...); err != nil {
+			return fmt.Errorf("export: %s", err)
+		}
+	case "buildtsi":
+		name := buildtsi.NewCommand()
+		if err := name.Run(args...); err != nil {
+			return fmt.Errorf("buildtsi: %s", err)
+		}
+	case "report":
+		name := report.NewCommand()
+		if err := name.Run(args...); err != nil {
+			return fmt.Errorf("report: %s", err)
+		}
+	case "reporttsi":
+		name := reporttsi.NewCommand()
+		if err := name.Run(args...); err != nil {
+			return fmt.Errorf("reporttsi: %s", err)
+		}
+	case "verify":
+		name := tsm.NewCommand()
+		if err := name.Run(args...); err != nil {
+			return fmt.Errorf("verify: %s", err)
+		}
+	case "verify-seriesfile":
+		name := seriesfile.NewCommand()
+		if err := name.Run(args...); err != nil {
+			return fmt.Errorf("verify-seriesfile: %s", err)
+		}
+	default:
+		return fmt.Errorf(`unknown command "%s"`+"\n"+`Run 'freets_inspect help' for usage`+"\n\n", name)
+	}
+
+	return nil
 }

@@ -1,6 +1,7 @@
 package run
 
 import (
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -14,9 +15,12 @@ import (
 
 	"github.com/freetsdb/freetsdb"
 	"github.com/freetsdb/freetsdb/coordinator"
+	"github.com/freetsdb/freetsdb/flux/control"
 	"github.com/freetsdb/freetsdb/logger"
 	"github.com/freetsdb/freetsdb/models"
 	"github.com/freetsdb/freetsdb/monitor"
+	"github.com/freetsdb/freetsdb/platform/storage/reads"
+	"github.com/freetsdb/freetsdb/query"
 	"github.com/freetsdb/freetsdb/services/collectd"
 	"github.com/freetsdb/freetsdb/services/continuous_querier"
 	"github.com/freetsdb/freetsdb/services/copier"
@@ -28,6 +32,7 @@ import (
 	"github.com/freetsdb/freetsdb/services/precreator"
 	"github.com/freetsdb/freetsdb/services/retention"
 	"github.com/freetsdb/freetsdb/services/snapshotter"
+	"github.com/freetsdb/freetsdb/services/storage"
 	"github.com/freetsdb/freetsdb/services/subscriber"
 	"github.com/freetsdb/freetsdb/services/udp"
 	"github.com/freetsdb/freetsdb/tcp"
@@ -35,8 +40,10 @@ import (
 	client "github.com/freetsdb/freetsdb/usage-client"
 	"go.uber.org/zap"
 
-	// Initialize the engine packages
+	// Initialize the engine package
 	_ "github.com/freetsdb/freetsdb/tsdb/engine"
+	// Initialize the index package
+	_ "github.com/freetsdb/freetsdb/tsdb/index"
 )
 
 var startTime time.Time
@@ -76,7 +83,7 @@ type Server struct {
 	MetaClient *meta.Client
 
 	TSDBStore     *tsdb.Store
-	QueryExecutor *coordinator.QueryExecutor
+	QueryExecutor *query.Executor
 	PointsWriter  *coordinator.PointsWriter
 	ShardWriter   *coordinator.ShardWriter
 	HintedHandoff *hh.Service
@@ -113,8 +120,30 @@ type Server struct {
 	config *Config
 }
 
+// updateTLSConfig stores with into the tls config pointed at by into but only if with is not nil
+// and into is nil. Think of it as setting the default value.
+func updateTLSConfig(into **tls.Config, with *tls.Config) {
+	if with != nil && into != nil && *into == nil {
+		*into = with
+	}
+}
+
 // NewServer returns a new instance of Server built from a config.
 func NewServer(c *Config, buildInfo *BuildInfo) (*Server, error) {
+	// First grab the base tls config we will use for all clients and servers
+	tlsConfig, err := c.TLS.Parse()
+	if err != nil {
+		return nil, fmt.Errorf("tls configuration: %v", err)
+	}
+
+	// Update the TLS values on each of the configs to be the parsed one if
+	// not already specified (set the default).
+	updateTLSConfig(&c.HTTPD.TLS, tlsConfig)
+	updateTLSConfig(&c.Subscriber.TLS, tlsConfig)
+	for i := range c.OpenTSDBInputs {
+		updateTLSConfig(&c.OpenTSDBInputs[i].TLS, tlsConfig)
+	}
+
 	// We need to ensure that a meta directory always exists even if
 	// we don't start the meta store.  node.json is always stored under
 	// the meta directory.
@@ -145,11 +174,8 @@ func NewServer(c *Config, buildInfo *BuildInfo) (*Server, error) {
 		node = freetsdb.NewNode(c.Data.Dir)
 	}
 
-	if !c.Data.Enabled {
-		return nil, fmt.Errorf("Must run as data node")
-	}
-
 	bind := c.BindAddress
+
 	s := &Server{
 		buildInfo: *buildInfo,
 		err:       make(chan error),
@@ -163,8 +189,6 @@ func NewServer(c *Config, buildInfo *BuildInfo) (*Server, error) {
 		NewNode:    newNode,
 		MetaClient: meta.NewClient(node),
 
-		Monitor: monitor.New(c.Monitor),
-
 		reportingDisabled: c.ReportingDisabled,
 
 		httpAPIAddr: c.HTTPD.BindAddress,
@@ -174,55 +198,85 @@ func NewServer(c *Config, buildInfo *BuildInfo) (*Server, error) {
 		config: c,
 	}
 
-	if c.Data.Enabled {
-		s.TSDBStore = tsdb.NewStore(c.Data.Dir)
-		s.TSDBStore.EngineOptions.Config = c.Data
+	s.Monitor = monitor.New(s, c.Monitor)
+	s.config.registerDiagnostics(s.Monitor)
 
-		// Copy TSDB configuration.
-		s.TSDBStore.EngineOptions.EngineVersion = c.Data.Engine
+	s.TSDBStore = tsdb.NewStore(c.Data.Dir)
+	s.TSDBStore.EngineOptions.Config = c.Data
 
-		// Set the shard writer
-		s.ShardWriter = coordinator.NewShardWriter(time.Duration(c.Coordinator.ShardWriterTimeout),
-			c.Coordinator.MaxRemoteWriteConnections)
+	// Copy TSDB configuration.
+	s.TSDBStore.EngineOptions.EngineVersion = c.Data.Engine
+	s.TSDBStore.EngineOptions.IndexVersion = c.Data.Index
 
-		// Create the hinted handoff service
-		s.HintedHandoff = hh.NewService(c.HintedHandoff, s.ShardWriter, s.MetaClient)
-		s.HintedHandoff.Monitor = s.Monitor
+	// Set the shard writer
+	s.ShardWriter = coordinator.NewShardWriter(time.Duration(c.Coordinator.ShardWriterTimeout),
+		c.Coordinator.MaxRemoteWriteConnections)
 
-		// Create the Subscriber service
-		s.Subscriber = subscriber.NewService(c.Subscriber)
+	// Create the hinted handoff service
+	s.HintedHandoff = hh.NewService(c.HintedHandoff, s.ShardWriter, s.MetaClient)
+	s.HintedHandoff.Monitor = s.Monitor
 
-		// Initialize points writer.
-		s.PointsWriter = coordinator.NewPointsWriter()
-		s.PointsWriter.WriteTimeout = time.Duration(c.Coordinator.WriteTimeout)
-		s.PointsWriter.TSDBStore = s.TSDBStore
-		s.PointsWriter.ShardWriter = s.ShardWriter
-		s.PointsWriter.HintedHandoff = s.HintedHandoff
-		s.PointsWriter.Subscriber = s.Subscriber
-		s.PointsWriter.Node = s.Node
+	// Create the Subscriber service
+	s.Subscriber = subscriber.NewService(c.Subscriber)
 
-		// Initialize meta executor.
-		metaExecutor := coordinator.NewMetaExecutor()
-		metaExecutor.MetaClient = s.MetaClient
-		metaExecutor.Node = s.Node
+	// Initialize points writer.
+	s.PointsWriter = coordinator.NewPointsWriter()
+	s.PointsWriter.WriteTimeout = time.Duration(c.Coordinator.WriteTimeout)
+	s.PointsWriter.TSDBStore = s.TSDBStore
+	s.PointsWriter.ShardWriter = s.ShardWriter
+	s.PointsWriter.HintedHandoff = s.HintedHandoff
+	s.PointsWriter.Subscriber = s.Subscriber
+	s.PointsWriter.Node = s.Node
 
-		// Initialize query executor.
-		s.QueryExecutor = coordinator.NewQueryExecutor()
-		s.QueryExecutor.MetaClient = s.MetaClient
-		s.QueryExecutor.TSDBStore = s.TSDBStore
-		s.QueryExecutor.Monitor = s.Monitor
-		s.QueryExecutor.PointsWriter = s.PointsWriter
-		s.QueryExecutor.MetaExecutor = metaExecutor
+	// Initialize meta executor.
+	metaExecutor := coordinator.NewMetaExecutor()
+	metaExecutor.MetaClient = s.MetaClient
+	metaExecutor.Node = s.Node
 
-		// Initialize the monitor
-		s.Monitor.Version = s.buildInfo.Version
-		s.Monitor.Commit = s.buildInfo.Commit
-		s.Monitor.Branch = s.buildInfo.Branch
-		s.Monitor.BuildTime = s.buildInfo.Time
-		s.Monitor.PointsWriter = (*monitorPointsWriter)(s.PointsWriter)
+	// Initialize query executor.
+	s.QueryExecutor = query.NewExecutor()
+	s.QueryExecutor.StatementExecutor = &coordinator.StatementExecutor{
+		MetaClient:  s.MetaClient,
+		TaskManager: s.QueryExecutor.TaskManager,
+		TSDBStore:   s.TSDBStore,
+		Node:        s.Node,
+		ShardMapper: &coordinator.LocalShardMapper{
+			MetaClient: s.MetaClient,
+			TSDBStore:  coordinator.LocalTSDBStore{Store: s.TSDBStore},
+		},
+		Monitor:           s.Monitor,
+		PointsWriter:      s.PointsWriter,
+		MaxSelectPointN:   c.Coordinator.MaxSelectPointN,
+		MaxSelectSeriesN:  c.Coordinator.MaxSelectSeriesN,
+		MaxSelectBucketsN: c.Coordinator.MaxSelectBucketsN,
 	}
+	s.QueryExecutor.TaskManager.QueryTimeout = time.Duration(c.Coordinator.QueryTimeout)
+	s.QueryExecutor.TaskManager.LogQueriesAfter = time.Duration(c.Coordinator.LogQueriesAfter)
+	s.QueryExecutor.TaskManager.MaxConcurrentQueries = c.Coordinator.MaxConcurrentQueries
+
+	// Initialize the monitor
+	s.Monitor.Version = s.buildInfo.Version
+	s.Monitor.Commit = s.buildInfo.Commit
+	s.Monitor.Branch = s.buildInfo.Branch
+	s.Monitor.BuildTime = s.buildInfo.Time
+	s.Monitor.PointsWriter = (*monitorPointsWriter)(s.PointsWriter)
 
 	return s, nil
+}
+
+// Statistics returns statistics for the services running in the Server.
+func (s *Server) Statistics(tags map[string]string) []models.Statistic {
+	var statistics []models.Statistic
+	statistics = append(statistics, s.QueryExecutor.Statistics(tags)...)
+	statistics = append(statistics, s.TSDBStore.Statistics(tags)...)
+	statistics = append(statistics, s.PointsWriter.Statistics(tags)...)
+	statistics = append(statistics, s.Subscriber.Statistics(tags)...)
+	for _, srv := range s.Services {
+		if m, ok := srv.(monitor.Reporter); ok {
+			statistics = append(statistics, m.Statistics(tags)...)
+		}
+	}
+	return statistics
 }
 
 func (s *Server) appendCoordinatorService(c coordinator.Config) {
@@ -249,6 +303,10 @@ func (s *Server) appendCopierService() {
 	s.CopierService = srv
 }
 
+func (s *Server) appendMonitorService() {
+	s.Services = append(s.Services, s.Monitor)
+}
+
 func (s *Server) appendRetentionPolicyService(c retention.Config) {
 	if !c.Enabled {
 		return
@@ -265,17 +323,16 @@ func (s *Server) appendHTTPDService(c httpd.Config) {
 	}
 	srv := httpd.NewService(c)
 	srv.Handler.MetaClient = s.MetaClient
-	srv.Handler.QueryAuthorizer = meta.NewQueryAuthorizer(s.MetaClient)
+	authorizer := meta.NewQueryAuthorizer(s.MetaClient)
+	srv.Handler.QueryAuthorizer = authorizer
+	srv.Handler.WriteAuthorizer = meta.NewWriteAuthorizer(s.MetaClient)
 	srv.Handler.QueryExecutor = s.QueryExecutor
+	srv.Handler.Monitor = s.Monitor
 	srv.Handler.PointsWriter = s.PointsWriter
 	srv.Handler.Version = s.buildInfo.Version
-
-	// If a ContinuousQuerier service has been started, attach it.
-	for _, srvc := range s.Services {
-		if cqsrvc, ok := srvc.(continuous_querier.ContinuousQuerier); ok {
-			srv.Handler.ContinuousQuerier = cqsrvc
-		}
-	}
+	ss := storage.NewStore(s.TSDBStore, s.MetaClient)
+	srv.Handler.Store = ss
+	srv.Handler.Controller = control.NewController(s.MetaClient, reads.NewReader(ss), authorizer, c.AuthEnabled, s.Logger)
 
 	s.Services = append(s.Services, srv)
 }
@@ -324,11 +381,7 @@ func (s *Server) appendPrecreatorService(c precreator.Config) error {
 	if !c.Enabled {
 		return nil
 	}
-	srv, err := precreator.NewService(c)
-	if err != nil {
-		return err
-	}
-
+	srv := precreator.NewService(c)
 	srv.MetaClient = s.MetaClient
 	s.Services = append(s.Services, srv)
 	return nil
@@ -351,6 +404,7 @@ func (s *Server) appendContinuousQueryService(c continuous_querier.Config) {
 	srv := continuous_querier.NewService(c)
 	srv.MetaClient = s.MetaClient
 	srv.QueryExecutor = s.QueryExecutor
+	srv.Monitor = s.Monitor
 	s.Services = append(s.Services, srv)
 }
 
@@ -384,28 +438,31 @@ func (s *Server) Open() error {
 	if s.TSDBStore != nil {
 		// Append services.
 		s.appendCoordinatorService(s.config.Coordinator)
+		s.appendMonitorService()
 		s.appendPrecreatorService(s.config.Precreator)
 		s.appendSnapshotterService()
 		s.appendCopierService()
 		s.appendContinuousQueryService(s.config.ContinuousQuery)
 		s.appendHTTPDService(s.config.HTTPD)
-		s.appendCollectdService(s.config.Collectd)
-		if err := s.appendOpenTSDBService(s.config.OpenTSDB); err != nil {
-			return err
-		}
-		for _, g := range s.config.UDPs {
-			s.appendUDPService(g)
-		}
 		s.appendRetentionPolicyService(s.config.Retention)
-		for _, g := range s.config.Graphites {
-			if err := s.appendGraphiteService(g); err != nil {
+
+		for _, i := range s.config.GraphiteInputs {
+			if err := s.appendGraphiteService(i); err != nil {
 				return err
 			}
 		}
+		for _, i := range s.config.CollectdInputs {
+			s.appendCollectdService(i)
+		}
+		for _, i := range s.config.OpenTSDBInputs {
+			if err := s.appendOpenTSDBService(i); err != nil {
+				return err
+			}
+		}
+		for _, i := range s.config.UDPInputs {
+			s.appendUDPService(i)
+		}
 
-		s.QueryExecutor.Node = s.Node
-
-		s.Subscriber.MetaClient = s.MetaClient
 		s.ShardWriter.MetaClient = s.MetaClient
 		s.HintedHandoff.MetaClient = s.MetaClient
 		s.Subscriber.MetaClient = s.MetaClient
@@ -416,12 +473,11 @@ func (s *Server) Open() error {
 		s.SnapshotterService.Listener = mux.Listen(snapshotter.MuxHeader)
 		s.CopierService.Listener = mux.Listen(copier.MuxHeader)
 
+		// Configure logging for all services and clients.
 		s.MetaClient.WithLogger(s.Logger)
-
 		s.TSDBStore.WithLogger(s.Logger)
 		if s.config.Data.QueryLogEnabled {
 			s.QueryExecutor.WithLogger(s.Logger)
-			s.QueryExecutor.MetaExecutor.WithLogger(s.Logger)
 		}
 		s.PointsWriter.WithLogger(s.Logger)
 		s.Subscriber.WithLogger(s.Logger)
@@ -433,11 +489,6 @@ func (s *Server) Open() error {
 
 		// Open TSDB store.
 		if err := s.TSDBStore.Open(); err != nil {
-			// Provide helpful error if user needs to upgrade shards to
-			// tsm1.
-			if serr, ok := err.(tsdb.ShardError); ok && serr.Err == tsdb.ErrUnknownEngineFormat {
-				return freetsdb.ErrUpgradeEngine
-			}
 			return fmt.Errorf("open tsdb store: %s", err)
 		}
 
@@ -446,7 +497,7 @@ func (s *Server) Open() error {
 			return fmt.Errorf("open hinted handoff: %s", err)
 		}
 
-		// Open the subcriber service
+		// Open the subscriber service
 		if err := s.Subscriber.Open(); err != nil {
 			return fmt.Errorf("open subscriber: %s", err)
 		}
@@ -456,10 +507,7 @@ func (s *Server) Open() error {
 			return fmt.Errorf("open points writer: %s", err)
 		}
 
-		// Open the monitor service
-		if err := s.Monitor.Open(); err != nil {
-			return fmt.Errorf("open monitor: %v", err)
-		}
+		s.PointsWriter.AddWriteSubscriber(s.Subscriber.Points())
 
 		for _, service := range s.Services {
 			if err := service.Open(); err != nil {
@@ -484,6 +532,7 @@ func (s *Server) Close() error {
 	if s.NodeListener != nil {
 		s.NodeListener.Close()
 	}
+
 	if s.Listener != nil {
 		s.Listener.Close()
 	}
@@ -494,9 +543,7 @@ func (s *Server) Close() error {
 		service.Close()
 	}
 
-	if s.Monitor != nil {
-		s.Monitor.Close()
-	}
+	s.config.deregisterDiagnostics(s.Monitor)
 
 	if s.PointsWriter != nil {
 		s.PointsWriter.Close()
@@ -504,6 +551,10 @@ func (s *Server) Close() error {
 
 	if s.HintedHandoff != nil {
 		s.HintedHandoff.Close()
+	}
+
+	if s.QueryExecutor != nil {
+		s.QueryExecutor.Close()
 	}
 
 	// Close the TSDBStore, no more reads or writes at this point
@@ -525,49 +576,49 @@ func (s *Server) Close() error {
 
 // startServerReporting starts periodic server reporting.
 func (s *Server) startServerReporting() {
+	s.reportServer()
+
+	ticker := time.NewTicker(24 * time.Hour)
+	defer ticker.Stop()
 	for {
 		select {
 		case <-s.closing:
 			return
-		default:
+		case <-ticker.C:
+			s.reportServer()
 		}
-		s.reportServer()
-		<-time.After(24 * time.Hour)
 	}
 }
 
-// reportServer reports anonymous statistics about the system.
+// reportServer reports usage statistics about the system.
 func (s *Server) reportServer() {
-	dis, err := s.MetaClient.Databases()
-	if err != nil {
-		log.Printf("failed to retrieve databases for reporting: %s", err.Error())
-		return
-	}
-	numDatabases := len(dis)
 
-	numMeasurements := 0
-	numSeries := 0
+	dbs, _ := s.MetaClient.Databases()
+	numDatabases := len(dbs)
 
-	// Only needed in the case of a data node
-	if s.TSDBStore != nil {
-		for _, di := range dis {
-			d := s.TSDBStore.DatabaseIndex(di.Name)
-			if d == nil {
-				// No data in this store for this database.
-				continue
-			}
-			m, s := d.MeasurementSeriesCounts()
-			numMeasurements += m
-			numSeries += s
+	var (
+		numMeasurements int64
+		numSeries       int64
+	)
+
+	for _, db := range dbs {
+		name := db.Name
+		n, err := s.TSDBStore.SeriesCardinality(name)
+		if err != nil {
+			s.Logger.Error(fmt.Sprintf("Unable to get series cardinality for database %s: %v", name, err))
+		} else {
+			numSeries += n
+		}
+
+		n, err = s.TSDBStore.MeasurementsCardinality(name)
+		if err != nil {
+			s.Logger.Error(fmt.Sprintf("Unable to get measurement cardinality for database %s: %v", name, err))
+		} else {
+			numMeasurements += n
 		}
 	}
 
 	clusterID := s.MetaClient.ClusterID()
-	if err != nil {
-		log.Printf("failed to retrieve cluster ID for reporting: %s", err.Error())
-		return
-	}
-
 	cl := client.New("")
 	usage := client.Usage{
 		Product: "freetsdb",
@@ -577,7 +628,6 @@ func (s *Server) reportServer() {
 					"os":               runtime.GOOS,
 					"arch":             runtime.GOARCH,
 					"version":          s.buildInfo.Version,
-					"server_id":        fmt.Sprintf("%v", s.Node.ID),
 					"cluster_id":       fmt.Sprintf("%v", clusterID),
 					"num_series":       numSeries,
 					"num_measurements": numMeasurements,
@@ -587,6 +637,8 @@ func (s *Server) reportServer() {
 			},
 		},
 	}
+
+	s.Logger.Info("Sending usage statistics to usage.freetsdb.org")
 
 	go cl.Save(usage)
 }
@@ -670,33 +722,31 @@ func (s *Server) joinCluster(conn net.Conn, peers []string) {
 		metaClient.WaitForDataChanged()
 	}
 
-	if s.config.Data.Enabled {
-		// If we've already created a data node for our id, we're done
-		if _, err := metaClient.DataNode(s.Node.ID); err == nil {
-			metaClient.Close()
-			return
-		}
-
-		n, err := metaClient.CreateDataNode(s.HTTPAddr(), s.TCPAddr())
-		for err != nil {
-			log.Printf("Unable to create data node. retry in 1s: %s", err.Error())
-			time.Sleep(time.Second)
-			n, err = s.MetaClient.CreateDataNode(s.HTTPAddr(), s.TCPAddr())
-		}
+	// If we've already created a data node for our id, we're done
+	if _, err := metaClient.DataNode(s.Node.ID); err == nil {
 		metaClient.Close()
+		return
+	}
 
-		s.Node.ID = n.ID
-		s.Node.Peers = peers
+	n, err := metaClient.CreateDataNode(s.HTTPAddr(), s.TCPAddr())
+	for err != nil {
+		log.Printf("Unable to create data node. retry in 1s: %s", err.Error())
+		time.Sleep(time.Second)
+		n, err = s.MetaClient.CreateDataNode(s.HTTPAddr(), s.TCPAddr())
+	}
+	metaClient.Close()
 
-		if err := s.Node.Save(); err != nil {
-			log.Printf("Error save node", err.Error())
-			return
-		}
-		s.NewNode = false
+	s.Node.ID = n.ID
+	s.Node.Peers = peers
 
-		if err := json.NewEncoder(conn).Encode(n); err != nil {
-			log.Printf("Error writing response", err.Error())
-		}
+	if err := s.Node.Save(); err != nil {
+		log.Printf("Error save node", err.Error())
+		return
+	}
+	s.NewNode = false
+
+	if err := json.NewEncoder(conn).Encode(n); err != nil {
+		log.Printf("Error writing response", err.Error())
 	}
 
 }
@@ -751,6 +801,7 @@ func (s *Server) remoteAddr(addr string) string {
 // MetaServers returns the meta node HTTP addresses used by this server.
 func (s *Server) MetaServers() []string {
 	return s.MetaClient.MetaServers()
+	return nil
 }
 
 // Service represents a service attached to the server.
@@ -804,20 +855,10 @@ func stopProfile() {
 	}
 }
 
-type tcpaddr struct{ host string }
-
-func (a *tcpaddr) Network() string { return "tcp" }
-func (a *tcpaddr) String() string  { return a.host }
-
 // monitorPointsWriter is a wrapper around `cluster.PointsWriter` that helps
 // to prevent a circular dependency between the `cluster` and `monitor` packages.
 type monitorPointsWriter coordinator.PointsWriter
 
 func (pw *monitorPointsWriter) WritePoints(database, retentionPolicy string, points models.Points) error {
-	return (*coordinator.PointsWriter)(pw).WritePoints(&coordinator.WritePointsRequest{
-		Database:         database,
-		RetentionPolicy:  retentionPolicy,
-		ConsistencyLevel: coordinator.ConsistencyLevelOne,
-		Points:           points,
-	})
+	return (*coordinator.PointsWriter)(pw).WritePointsPrivileged(database, retentionPolicy, coordinator.ConsistencyLevelAny, points)
 }

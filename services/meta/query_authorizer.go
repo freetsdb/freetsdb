@@ -6,10 +6,12 @@ import (
 	"github.com/freetsdb/freetsdb/services/influxql"
 )
 
+// QueryAuthorizer determines whether a user is authorized to execute a given query.
 type QueryAuthorizer struct {
 	Client *Client
 }
 
+// NewQueryAuthorizer returns a new instance of QueryAuthorizer.
 func NewQueryAuthorizer(c *Client) *QueryAuthorizer {
 	return &QueryAuthorizer{
 		Client: c,
@@ -20,14 +22,14 @@ func NewQueryAuthorizer(c *Client) *QueryAuthorizer {
 // Database can be "" for queries that do not require a database.
 // If no user is provided it will return an error unless the query's first statement is to create
 // a root user.
-func (a *QueryAuthorizer) AuthorizeQuery(u *UserInfo, query *influxql.Query, database string) error {
+func (a *QueryAuthorizer) AuthorizeQuery(u User, query *influxql.Query, database string) error {
 	// Special case if no users exist.
 	if n := a.Client.UserCount(); n == 0 {
 		// Ensure there is at least one statement.
 		if len(query.Statements) > 0 {
 			// First statement in the query must create a user with admin privilege.
 			cu, ok := query.Statements[0].(*influxql.CreateUserStatement)
-			if ok && cu.Admin == true {
+			if ok && cu.Admin {
 				return nil
 			}
 		}
@@ -46,6 +48,29 @@ func (a *QueryAuthorizer) AuthorizeQuery(u *UserInfo, query *influxql.Query, dat
 		}
 	}
 
+	return u.AuthorizeQuery(database, query)
+}
+
+func (a *QueryAuthorizer) AuthorizeDatabase(u User, priv influxql.Privilege, database string) error {
+	if u == nil {
+		return &ErrAuthorize{
+			Database: database,
+			Message:  "no user provided",
+		}
+	}
+
+	if !u.AuthorizeDatabase(priv, database) {
+		return &ErrAuthorize{
+			Database: database,
+			Message:  fmt.Sprintf("user %q, requires %s for database %q", u.ID(), priv.String(), database),
+		}
+	}
+
+	return nil
+}
+
+func (u *UserInfo) AuthorizeQuery(database string, query *influxql.Query) error {
+
 	// Admin privilege allows the user to execute all statements.
 	if u.Admin {
 		return nil
@@ -54,7 +79,10 @@ func (a *QueryAuthorizer) AuthorizeQuery(u *UserInfo, query *influxql.Query, dat
 	// Check each statement in the query.
 	for _, stmt := range query.Statements {
 		// Get the privileges required to execute the statement.
-		privs := stmt.RequiredPrivileges()
+		privs, err := stmt.RequiredPrivileges()
+		if err != nil {
+			return err
+		}
 
 		// Make sure the user has the privileges required to execute
 		// each statement.
@@ -77,7 +105,7 @@ func (a *QueryAuthorizer) AuthorizeQuery(u *UserInfo, query *influxql.Query, dat
 			if db == "" {
 				db = database
 			}
-			if !u.Authorize(p.Privilege, db) {
+			if !u.AuthorizeDatabase(p.Privilege, db) {
 				return &ErrAuthorize{
 					Query:    query,
 					User:     u.Name,

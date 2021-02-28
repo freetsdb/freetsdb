@@ -21,9 +21,6 @@ const (
 
 	fieldDimensionsRequestMessage
 	fieldDimensionsResponseMessage
-
-	seriesKeysRequestMessage
-	seriesKeysResponseMessage
 )
 
 // ShardWriter writes a set of points to a shard.
