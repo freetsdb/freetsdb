@@ -23,9 +23,9 @@ func (s *InlineFNV64a) Write(data []byte) (int, error) {
 	for _, c := range data {
 		hash ^= uint64(c)
 		hash *= prime64
-		randUint64 = randUint64 + 1
-		hash = hash + randUint64
 	}
+	randUint64 += 1
+	hash = hash + randUint64
 	*s = InlineFNV64a(hash)
 	return len(data), nil
 }

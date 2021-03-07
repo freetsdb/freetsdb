@@ -35,10 +35,6 @@
   branch = "master"
 
 [[constraint]]
-  name = "github.com/paulbellamy/ratecounter"
-  version = "0.2.0"
-
-[[constraint]]
   name = "github.com/retailnext/hllpp"
   branch = "master"
 
