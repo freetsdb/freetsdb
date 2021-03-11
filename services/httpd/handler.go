@@ -26,7 +26,6 @@ import (
 	"github.com/golang/snappy"
 	"github.com/freetsdb/freetsdb"
 	"github.com/freetsdb/freetsdb/coordinator"
-	"github.com/freetsdb/freetsdb/services/influxql"
 	"github.com/freetsdb/freetsdb/logger"
 	"github.com/freetsdb/freetsdb/models"
 	"github.com/freetsdb/freetsdb/monitor"
@@ -36,12 +35,13 @@ import (
 	"github.com/freetsdb/freetsdb/prometheus"
 	"github.com/freetsdb/freetsdb/prometheus/remote"
 	"github.com/freetsdb/freetsdb/query"
+	"github.com/freetsdb/freetsdb/services/flux"
+	"github.com/freetsdb/freetsdb/services/flux/lang"
+	"github.com/freetsdb/freetsdb/services/influxql"
 	"github.com/freetsdb/freetsdb/services/meta"
 	"github.com/freetsdb/freetsdb/services/storage"
 	"github.com/freetsdb/freetsdb/tsdb"
 	"github.com/freetsdb/freetsdb/uuid"
-	"github.com/freetsdb/freetsdb/services/flux"
-	"github.com/freetsdb/freetsdb/services/flux/lang"
 	prom "github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"go.uber.org/zap"
@@ -57,6 +57,8 @@ const (
 	DefaultDebugRequestsInterval = 10 * time.Second
 
 	MaxDebugRequestsInterval = 6 * time.Hour
+
+	InfluxDBVersion = "1.8.4"
 )
 
 // AuthenticationMethod defines the type of authentication used.
@@ -369,6 +371,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
 
 	// Add version and build header to all FreeTSDB requests.
+	w.Header().Add("X-Influxdb-Version", InfluxDBVersion)
 	w.Header().Add("X-Freetsdb-Version", h.Version)
 
 	if strings.HasPrefix(r.URL.Path, "/debug/pprof") && h.Config.PprofEnabled {

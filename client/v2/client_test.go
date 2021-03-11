@@ -278,7 +278,7 @@ func TestClientDownstream400_Query(t *testing.T) {
 func TestClient500_Query(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		w.Header().Set("X-Freetsdb-Version", "0.1")
+		w.Header().Set("X-Freetsdb-Version", "x.x")
 		w.WriteHeader(http.StatusInternalServerError)
 		w.Write([]byte(`{"error":"test"}`))
 	}))
@@ -304,7 +304,7 @@ func TestClient_ChunkedQuery(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var data Response
 		w.Header().Set("Content-Type", "application/json")
-		w.Header().Set("X-Freetsdb-Version", "0.1")
+		w.Header().Set("X-Freetsdb-Version", "x.x")
 		w.WriteHeader(http.StatusOK)
 		enc := json.NewEncoder(w)
 		_ = enc.Encode(data)
@@ -375,7 +375,7 @@ func TestClientDownstream500_ChunkedQuery(t *testing.T) {
 func TestClient500_ChunkedQuery(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		w.Header().Set("X-Freetsdb-Version", "0.1")
+		w.Header().Set("X-Freetsdb-Version", "x.x")
 		w.WriteHeader(http.StatusInternalServerError)
 		w.Write([]byte(`{"error":"test"}`))
 	}))
@@ -911,7 +911,7 @@ func TestClient_QueryAsChunk(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var data Response
 		w.Header().Set("Content-Type", "application/json")
-		w.Header().Set("X-Freetsdb-Version", "0.1")
+		w.Header().Set("X-Freetsdb-Version", "x.x")
 		w.WriteHeader(http.StatusOK)
 		enc := json.NewEncoder(w)
 		_ = enc.Encode(data)
