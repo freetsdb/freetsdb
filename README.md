@@ -80,14 +80,7 @@ You can add the line `export GOPATH=$HOME/gocodez` to your bash/zsh file to be s
 
 -----
 
-Make sure you have Go installed and the project structure as shown above. To then get the dependencies for the project, execute the following commands:
-
-```bash
-cd $GOPATH/src/github.com/freetsdb/freetsdb
-dep ensure
-```
-
-To then build and install the binaries, run the following command.
+Make sure you have Go installed and the project structure as shown above. To then build and install the binaries, run the following command.
 
 ```bash
 go clean ./...
