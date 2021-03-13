@@ -1,0 +1,53 @@
+module github.com/freetsdb/freetsdb
+
+go 1.15
+
+require (
+	collectd.org v0.3.0
+	github.com/BurntSushi/toml v0.3.1
+	github.com/RoaringBitmap/roaring v0.5.5
+	github.com/apache/arrow/go/arrow v0.0.0-20210312155728-26fc75157af2
+	github.com/bmizerany/pat v0.0.0-20170815010413-6226ea591a40
+	github.com/boltdb/bolt v1.3.1
+	github.com/c-bata/go-prompt v0.2.6
+	github.com/cespare/xxhash v1.1.0
+	github.com/davecgh/go-spew v1.1.1
+	github.com/dgrijalva/jwt-go v3.2.0+incompatible
+	github.com/dgryski/go-bitstream v0.0.0-20180413035011-3522498ce2c8
+	github.com/glycerine/go-unsnap-stream v0.0.0-20210130063903-47dfef350d96
+	github.com/go-sql-driver/mysql v1.5.0
+	github.com/gogo/protobuf v1.3.2
+	github.com/golang/snappy v0.0.3
+	github.com/google/go-cmp v0.5.5
+	github.com/goreleaser/goreleaser v0.159.0
+	github.com/hashicorp/go-hclog v0.15.0
+	github.com/hashicorp/raft v1.2.0
+	github.com/hashicorp/raft-boltdb v0.0.0-20191021154308-4207f1bf0617
+	github.com/jsternberg/zap-logfmt v1.2.0
+	github.com/jwilder/encoding v0.0.0-20170811194829-b4e1701a28ef
+	github.com/klauspost/pgzip v1.2.5
+	github.com/lib/pq v1.10.0
+	github.com/mattn/go-isatty v0.0.12
+	github.com/mschoch/smat v0.2.0
+	github.com/opentracing/opentracing-go v1.2.0
+	github.com/peterh/liner v1.2.1
+	github.com/pkg/errors v0.9.1
+	github.com/prometheus/client_golang v1.9.0
+	github.com/retailnext/hllpp v1.0.0
+	github.com/satori/go.uuid v1.2.0
+	github.com/segmentio/kafka-go v0.4.10
+	github.com/stretchr/testify v1.7.0
+	github.com/tinylib/msgp v1.1.5
+	github.com/willf/bitset v1.1.11
+	github.com/xlab/treeprint v1.1.0
+	go.uber.org/zap v1.16.0
+	golang.org/x/crypto v0.0.0-20210220033148-5ea612d1eb83
+	golang.org/x/net v0.0.0-20210226172049-e18ecbb05110
+	golang.org/x/sync v0.0.0-20210220032951-036812b2e83c
+	golang.org/x/sys v0.0.0-20210309074719-68d13333faf2
+	golang.org/x/text v0.3.5
+	golang.org/x/time v0.0.0-20210220033141-f8bda1e9f3ba
+	google.golang.org/grpc v1.36.0
+	gopkg.in/fatih/pool.v2 v2.0.0
+	honnef.co/go/tools v0.1.3
+)

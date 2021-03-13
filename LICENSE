@@ -1,6 +1,6 @@
 FreeTSDB Licensing
 
-Copyright (c) 2018-2019 Jian Han(hanj4096@gmail.com) and Contributors.
+Copyright (c) 2018-2021 Shengnan Zhu(jzkongfu@gmail.com) and Contributors.
 
 Licensed under the MIT License modified with Commons Clause Restriction; you 
 may not use this file except in compliance with the License. You may obtain a
@@ -38,6 +38,6 @@ service whose value derives, entirely or substantially, from the functionality o
 Any license notice or attribution required by the License must also include this Commons Cause
 License Condition notice.
 
-For purposes of the clause above, the “Licensor” is Jian Han(hanj4096@gmail.com) and Shengnan Zhu(jzkongfu@gmail.com), the “License” 
+For purposes of the clause above, the “Licensor” is Shengnan Zhu(jzkongfu@gmail.com), the “License” 
 is the MIT License(MIT), and the Software is the FreeTSDB software provided with this notice.
 
