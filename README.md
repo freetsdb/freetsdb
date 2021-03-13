@@ -42,7 +42,7 @@ FreeTSDB's performance is same with InfluxDB. For example, on Aliyun(Alibaba Clo
 
 -------------
 
-FreeTSDB requires Go 1.4.3 or above.
+FreeTSDB requires Go 1.12 or above.
 
 Gvm is a Go version manager. It's useful for installing Go. For instructions
 on how to install it see [the gvm page on github](https://github.com/moovweb/gvm).
@@ -50,18 +50,8 @@ on how to install it see [the gvm page on github](https://github.com/moovweb/gvm
 After installing gvm you can install and set the default go version by
 running the following:
 
-    gvm install go1.11
-    gvm use go1.11 --default
-
-### Installing Dep
-
--------------
-
-FreeTSDB uses [dep](https://github.com/golang/dep) to manage dependencies.  Install it by running the following:
-
-    go get github.com/golang/dep
-    cd $GOPATH/src/github.com/golang/dep
-    ./install.sh
+    gvm install go1.15.8
+    gvm use go1.15.8 --default
 
 ### Revision Control Systems
 
