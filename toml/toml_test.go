@@ -13,7 +13,7 @@ import (
 
 	"github.com/BurntSushi/toml"
 	"github.com/google/go-cmp/cmp"
-	"github.com/freetsdb/freetsdb/cmd/influxd/run"
+	"github.com/freetsdb/freetsdb/cmd/freetsd/run"
 	itoml "github.com/freetsdb/freetsdb/toml"
 )
 
