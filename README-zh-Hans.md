@@ -2,9 +2,9 @@
 
 # FreeTSDB 
 
-## An Open-Source Time Series Database, and the BEST Open-Source replacement for InfluxDB Enterprise.
+## An Open-Source Distributed Time Series Database, and the BEST Open-Source replacement for InfluxDB Enterprise.
 
-FreeTSDB是InfluxDB企业版的开源替代，增强了代码健壮性、补齐集群等高可用能力、100%兼容InfluxDB生态和接口。
+FreeTSDB是一个开源的分布式时间序列数据库，是InfluxDB企业版的开源替代，增强了代码健壮性、补齐集群等高可用能力、100%兼容InfluxDB生态和接口。
 
 ## 性能
 FreeTSDB与InfluxDB性能一致，比如，在阿里云ECS（16 vCPU 32 GiB, Ubuntu 18.04 64bit），FreeTSDB的写性能是**386985.67 point/sec**，大约是阿里云InfluxDB服务(16核64G ：~ 150000 point/sec)的**2.58倍**。

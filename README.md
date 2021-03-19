@@ -2,9 +2,9 @@
 
 # FreeTSDB 
 
-## An Open-Source Time Series Database, and the BEST Open-Source replacement for InfluxDB Enterprise.
+## An Open-Source Distributed Time Series Database, and the BEST Open-Source replacement for InfluxDB Enterprise.
 
-FreeTSDB is an open source **time series database** with
+FreeTSDB is an open source **Distributed Time Series Database** with
 **no external dependencies**. It's the BEST Open-Source replacement for **InfluxDB Enterprise**.
 It's useful for recording metrics, events, and performing analytics.
 
