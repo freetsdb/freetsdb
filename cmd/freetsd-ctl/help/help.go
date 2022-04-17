@@ -37,7 +37,7 @@ The commands are:
     config               display the default configuration
     help                 display this help message
     restore              uses a snapshot of a data node to rebuild a cluster
-    run                  run node with existing configuration
+    show                 show node status
     version              displays the FreeTSDB version
 
 "run" is the default command.

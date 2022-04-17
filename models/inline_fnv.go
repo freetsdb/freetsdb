@@ -10,8 +10,6 @@ const (
 // See https://en.wikipedia.org/wiki/Fowler%E2%80%93Noll%E2%80%93Vo_hash_function.
 type InlineFNV64a uint64
 
-var randUint64 uint64 = 1
-
 // NewInlineFNV64a returns a new instance of InlineFNV64a.
 func NewInlineFNV64a() InlineFNV64a {
 	return offset64
@@ -24,8 +22,6 @@ func (s *InlineFNV64a) Write(data []byte) (int, error) {
 		hash ^= uint64(c)
 		hash *= prime64
 	}
-	randUint64 += 1
-	hash = hash + randUint64
 	*s = InlineFNV64a(hash)
 	return len(data), nil
 }
