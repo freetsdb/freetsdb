@@ -133,8 +133,8 @@ Perform the following steps on each meta server**.
 **The Linux System**
 
 ```
-wget https://github.com/freetsdb/freetsdb/releases/download/v0.0.2-beta.1/freetsdb-v0.0.2-beta.1_linux_amd64.tar.gz
-tar -zxvf freetsdb-v0.0.2-beta.1_linux_amd64.tar.gz
+wget https://github.com/freetsdb/freetsdb/releases/download/v0.1.2/freetsdb-v0.1.2_linux_amd64.tar.gz
+tar -zxvf freetsdb-v0.1.2_linux_amd64.tar.gz
 ```
 
 ###### II. Edit the configuration file
@@ -257,8 +257,8 @@ Perform the following steps on each data node.
 **The Linux System**
 
 ```
-wget https://github.com/freetsdb/freetsdb/releases/download/v0.0.2-beta.1/freetsdb-v0.0.2-beta.1_linux_amd64.tar.gz
-tar -zxvf freetsdb-v0.0.2-beta.1_linux_amd64.tar.gz
+wget https://github.com/freetsdb/freetsdb/releases/download/v0.1.2/freetsdb-v0.1.2_linux_amd64.tar.gz
+tar -zxvf freetsdb-v0.1.2_linux_amd64.tar.gz
 ```
 
 ###### II. Edit the data node configuration files
