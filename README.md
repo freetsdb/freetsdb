@@ -31,10 +31,6 @@ Data nodes communicate with each other through a TCP protocol that is bound to p
 Within a cluster, all meta nodes must communicate with all other meta nodes. All data nodes must communicate with all other data nodes and all meta nodes.
 
 
-## Performance
-FreeTSDB's performance is same with InfluxDB. For example, on Aliyun(Alibaba Cloud)'s ECS(16 vCPU 32 GiB, Ubuntu 18.04 64bit),  FreeTSDB's writing performance is **386985.67 point/sec**, which is approximately **2.58x** faster ingestion than Aliyun(Alibaba Cloud)'s InfluxDB system(16 vCPU 16G, ~ 150000 point/sec).
-
-![](https://github.com/freetsdb/freetsdb/blob/master/images/Writing-Performance.png)
 
 ## Build
 
